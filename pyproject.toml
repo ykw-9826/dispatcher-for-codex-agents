@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools==79.0.1", "wheel==0.47.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dispatcher-for-codex-agents"
+version = "1.0.0"
+description = "Cross-provider external model execution and event-driven Codex continuation."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11,<3.12"
+dependencies = ["pydantic==2.13.4"]
+
+[project.scripts]
+dca = "dispatcher_for_codex_agents.agent_harness.cli:main"
+dca-notify = "dispatcher_for_codex_agents.notifications.cli:main"
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "ruff==0.15.21", "black==26.5.1"]
+
+[tool.uv]
+constraint-dependencies = [
+    "annotated-types==0.7.0", "pydantic-core==2.46.4",
+    "typing-extensions==4.16.0", "typing-inspection==0.4.2",
+    "iniconfig==2.3.0", "packaging==26.2", "pluggy==1.6.0",
+    "pygments==2.20.0", "click==8.4.2", "mypy-extensions==1.1.0",
+    "pathspec==1.1.1", "platformdirs==4.10.0", "pytokens==0.4.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -o cache_dir=runtime/cache/pytest"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+cache-dir = "runtime/cache/ruff"
+extend-exclude = ["runtime", "releases", "runs", "reports", "exports", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+extend-exclude = '/(runtime|releases|runs|reports|exports|build|dist)/'

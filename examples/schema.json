@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "properties": {
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "record_id": {"type": "string"},
+          "decision": {"type": "string", "enum": ["SYNTHETIC_ACCEPT", "SYNTHETIC_SKIP"]},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        },
+        "required": ["record_id", "decision", "confidence"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["results"],
+  "additionalProperties": false
+}

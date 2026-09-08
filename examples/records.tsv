@@ -1,0 +1,4 @@
+batch_id	record_id	title	description	private_note
+DEMO	SYN-003	Invented green tile	A synthetic catalog record about a green tile.	Not sent to the agent
+DEMO	SYN-001	Invented blue tile	A synthetic catalog record about a blue tile.	Not sent to the agent
+DEMO	SYN-002	Invented red tile	A synthetic catalog record about a red tile.	Not sent to the agent

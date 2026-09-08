@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "task_id": "example-controller",
+  "executable": "/absolute/path/to/codex",
+  "codex_home": "/absolute/path/to/approved-host-config",
+  "model": "OWNER_SELECTED_MODEL",
+  "provider": "OWNER_SELECTED_PROVIDER",
+  "working_directory": "/absolute/path/to/private-controller-directory",
+  "allowed_actions": ["start_approved_jobs", "read_verified_results", "summarize_results"],
+  "expires_at": 0.0,
+  "wake_budget": 1,
+  "main_turn_budget": 2,
+  "main_turn_timeout": 600.0,
+  "jobs": [
+    {"job_id": "synthetic-external-task", "attempt_id": "example-attempt", "kind": "fixture", "delay_seconds": 1.0, "fixture_value": 7}
+  ],
+  "notification_config": "/absolute/path/to/checkout/configs/notifications.json",
+  "minimum_idle_seconds": 0.0
+}

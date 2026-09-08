@@ -1,0 +1,3 @@
+record_id	description	unapproved_note
+FIC-002	A fictional catalog entry describes an invented green tile.	must not be sent
+FIC-001	A fictional catalog entry describes an invented blue tile.	must not be sent

@@ -1,0 +1,1 @@
+This is a synthetic software demonstration, not a real-world assessment. Return the requested JSON for each supplied synthetic catalog record exactly once. Do not use tools or files. Do not add records or fields. The fake executable emits fixture values, not reasoned decisions.

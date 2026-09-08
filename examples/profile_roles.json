@@ -1,0 +1,6 @@
+{
+  "profiles": [
+    {"profile_id": "test-primary", "role": "synthetic-primary", "authority_class": "authoritative", "execution_order": 1},
+    {"profile_id": "test-shadow", "role": "synthetic-shadow", "authority_class": "shadow", "execution_order": 2}
+  ]
+}

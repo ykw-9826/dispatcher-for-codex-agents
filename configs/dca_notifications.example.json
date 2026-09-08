@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "ledger_directory": "/absolute/path/to/checkout/runtime/state/notifications",
+  "sinks": [
+    {
+      "sink_id": "serverchan",
+      "kind": "serverchan",
+      "enabled": false,
+      "send_key_env_file": "/absolute/external/private/serverchan.env"
+    },
+    {
+      "sink_id": "webhook",
+      "kind": "webhook",
+      "enabled": false,
+      "url": "",
+      "success_field": "ok",
+      "success_value": true
+    }
+  ]
+}
