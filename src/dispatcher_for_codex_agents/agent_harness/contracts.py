@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -105,6 +105,17 @@ class CapabilityPolicy(HarnessModel):
         return not (self.read_paths or self.write_paths or self.tools)
 
 
+class RuntimeContract(HarnessModel):
+    """Task-owned result interpretation; never grants runtime capabilities."""
+
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, revalidate_instances="always"
+    )
+
+    structured_output: Literal["strict_json", "json_or_single_fence"] = "strict_json"
+    rejected_user_input: Literal["fail", "warn_if_runtime_rejected"] = "fail"
+
+
 class AgentTask(HarnessModel):
     """Model-agnostic description of one bounded external agent task."""
 
@@ -117,6 +128,7 @@ class AgentTask(HarnessModel):
     call_limit: int = Field(ge=1, le=100)
     expected_output_schema: dict[str, Any]
     capability_policy: CapabilityPolicy = Field(default_factory=CapabilityPolicy)
+    runtime_contract: RuntimeContract = Field(default_factory=RuntimeContract)
 
     @field_validator("task_id")
     @classmethod
@@ -178,6 +190,7 @@ class ModelProfile(HarnessModel):
             "provider",
             "model",
             "capability_policy",
+            "runtime_contract",
             "read_paths",
             "write_paths",
             "tools",

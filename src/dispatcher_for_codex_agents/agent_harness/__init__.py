@@ -22,6 +22,7 @@ from dispatcher_for_codex_agents.agent_harness.contracts import (
     InvocationResult,
     InvocationStatus,
     ModelProfile,
+    RuntimeContract,
     SchemaValidationStatus,
 )
 from dispatcher_for_codex_agents.agent_harness.payload import PayloadBuilder
@@ -39,6 +40,7 @@ __all__ = [
     "InvocationStatus",
     "LoadedPlan",
     "ModelProfile",
+    "RuntimeContract",
     "PayloadBuilder",
     "ProfileRole",
     "AgentTask",

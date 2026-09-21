@@ -12,11 +12,19 @@ from pathlib import Path
 
 
 def emit(value: dict[str, object]) -> None:
-    print(json.dumps(value, sort_keys=True), flush=True)
+    print(
+        json.dumps(value, sort_keys=True),
+        flush=True,
+        end="\r\n" if os.environ.get("FAKE_JSONL_CRLF") == "1" else "\n",
+    )
 
 
 if "--version" in sys.argv:
-    print("fake-codex 0.153.4")
+    print(
+        "dca.synthetic-runtime/1"
+        if os.environ.get("FAKE_RUNTIME_CONTRACT_DEMO") == "1"
+        else "fake-codex 0.153.4"
+    )
     raise SystemExit(0)
 
 arguments = sys.argv[1:]
@@ -175,6 +183,7 @@ thread: dict[str, object] = {"type": "thread.started", "thread_id": "fake-thread
 if mode != "success_no_served" and os.environ.get("FAKE_OMIT_SERVED_MODEL") != "1":
     thread["served_model"] = served_model
 emit(thread)
+emit({"type": "turn.started"})
 
 if mode == "timeout":
     time.sleep(30)
@@ -241,6 +250,7 @@ if mode == "capability":
         {
             "type": "item.completed",
             "item": {
+                "id": "capability-command",
                 "type": "command_execution",
                 "command": "fixture-command",
                 "status": "completed" if allowed else "failed",
@@ -250,7 +260,11 @@ if mode == "capability":
     )
     output = {"decision": "TYPE_A", "reason": reason}
 elif mode == "allowed_event":
-    emit({"type": "item.completed", "item": json.loads(os.environ["FAKE_CAP_EVENT"])})
+    item = json.loads(os.environ["FAKE_CAP_EVENT"])
+    # Capability fixtures still need the CLI's required item identity. Malformed
+    # lifecycle evidence is injected separately by runtime-contract tests.
+    item.setdefault("id", "capability-event")
+    emit({"type": "item.completed", "item": item})
     output = {"decision": "TYPE_A", "reason": "fixture event"}
 elif mode == "schema_invalid":
     output = {"decision": "MAYBE", "reason": "invalid enum"}
@@ -260,13 +274,36 @@ elif mode.startswith("batch_"):
     output = batch_output(payload, mode)
 else:
     output = {"decision": "TYPE_A", "reason": "fictional fixture accepted"}
+if os.environ.get("FAKE_RUNTIME_CONTRACT_DEMO") == "1":
+    # Explicit test protocol, NOT a captured Codex event or CLI schema claim.
+    emit(
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "input-1",
+                "type": "request_user_input_rejection",
+                "tool": "request_user_input",
+                "phase": "before_execution",
+                "reason": "noninteractive",
+                "execution_started": False,
+                "required_input": False,
+                "required_work_satisfied": True,
+            },
+        }
+    )
+final_text = json.dumps(output, sort_keys=True)
+if (
+    os.environ.get("FAKE_RUNTIME_CONTRACT_DEMO") == "1"
+    or os.environ.get("FAKE_FENCE_OUTPUT") == "1"
+):
+    final_text = "```json\n" + final_text + "\n```"
 emit(
     {
         "type": "item.completed",
         "item": {
             "id": "message-1",
             "type": "agent_message",
-            "text": json.dumps(output, sort_keys=True),
+            "text": final_text,
         },
     }
 )

@@ -10,8 +10,10 @@ uv.lock
 configs/dca_notifications.example.json
 configs/public_files.txt
 docs/contract_v1.md
+docs/runtime_contract_v1.0.2.md
 docs/capability_policy.md
 docs/release_notes_v1.0.1.md
+docs/release_notes_v1.0.2.md
 docs/acceptance_policy.md
 docs/native_capabilities.md
 docs/dispatcher_for_codex_agents.md
@@ -20,6 +22,7 @@ docs/provenance.md
 docs/public_preparation.md
 examples/bridge.example.json
 examples/test_demo.py
+examples/runtime_contract_demo.py
 examples/cross_provider_demo.py
 examples/profile_roles.json
 examples/prompt.txt
@@ -59,6 +62,8 @@ src/dispatcher_for_codex_agents/agent_harness/profile.py
 src/dispatcher_for_codex_agents/agent_harness/runtime.py
 src/dispatcher_for_codex_agents/agent_harness/schema.py
 src/dispatcher_for_codex_agents/agent_harness/shard.py
+src/dispatcher_for_codex_agents/agent_harness/runtime_contract.py
+src/dispatcher_for_codex_agents/agent_harness/revalidation.py
 tests/conftest.py
 tests/data/agent_harness_smoke.tsv
 tests/fixtures/fake_codex_cli.py
@@ -78,3 +83,5 @@ tests/unit/test_profile_compatibility.py
 tests/unit/test_agent_harness_batch.py
 tests/unit/test_agent_harness_cli.py
 tests/unit/test_agent_harness_runtime.py
+tests/unit/test_runtime_contract.py
+tests/unit/test_revalidation.py

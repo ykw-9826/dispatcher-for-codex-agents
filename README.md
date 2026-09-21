@@ -64,6 +64,9 @@ DCA writes result files; external agents receive selected input over stdin by de
 
 ## CLI
 
+Opt-in output interpretation and immutable history revalidation are described in
+the [1.0.2 runtime contract](docs/runtime_contract_v1.0.2.md), with a zero-model demo.
+
 - `invoke` — run one external agent task.
 - `batch plan/run/status/collect/retry-plan/monitor` — manage batches and their results.
 - `bridge start/status/cancel/recover` — run a dedicated controller with event-driven continuation.
@@ -151,6 +154,8 @@ Demo 用 3 条虚构记录走完规划、虚拟调用、校验、恢复和汇总
 这个示例也只运行随包测试程序。GLM、DeepSeek 和 Codex 控制器都是模拟的，验证的是独立 provider 配置与 DCA 事件交接，不是实时连通性或模型质量。加 `--dry-run` 只检查测试计划，不执行外部 Agent。示例没有 live 开关；真实调用必须另行批准并核对配置。
 
 ## 工作方式
+
+显式输出解释和不可变历史重新核验见 [1.0.2 运行合同](docs/runtime_contract_v1.0.2.md)，其中提供零模型测试 Demo。
 
 ```text
 Codex/GPT 主控制器 -> DCA -> GLM 外部 Agent      -> 校验结果

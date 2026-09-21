@@ -32,6 +32,7 @@ from dispatcher_for_codex_agents.agent_harness.contracts import (
     FailureCode,
     InvocationResult,
     ModelProfile,
+    RuntimeContract,
 )
 from dispatcher_for_codex_agents.agent_harness.payload import (
     PayloadBuilder,
@@ -158,6 +159,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
 
+    revalidation = subparsers.add_parser(
+        "revalidate", help="Reinterpret hash-pinned history without executing an agent."
+    )
+    revalidation.add_argument("--source-manifest", required=True)
+    revalidation.add_argument("--runtime-contract", required=True)
+    revalidation.add_argument("--revalidation-id", required=True)
+    revalidation.add_argument("--output-root", required=True)
+
     batch = subparsers.add_parser(
         "batch", help="Plan, run, recover, inspect, or collect external agent shards."
     )
@@ -180,6 +189,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--output-root", required=True)
     plan.add_argument("--membership-tsv", default=None)
     plan.add_argument("--timeout", default=600.0, type=float)
+    plan.add_argument(
+        "--runtime-contract",
+        help="Task-owned interpretation policy JSON; not capabilities.",
+    )
 
     run = batch_commands.add_parser(
         "run", help="Execute only never-started planned attempts."
@@ -208,6 +221,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     collect.add_argument("--plan-root", required=True)
     collect.add_argument("--collection-id", required=True)
+    collect.add_argument(
+        "--selection", help="Explicit original-or-revalidation selection JSON."
+    )
 
     retry = batch_commands.add_parser(
         "retry-plan", help="Freeze an explicit human-approved retry plan."
@@ -391,6 +407,7 @@ def _run_batch_command(args: argparse.Namespace, cancellation: Event) -> int:
             output_root=args.output_root,
             membership_tsv=args.membership_tsv,
             timeout=args.timeout,
+            runtime_contract=_load_runtime_contract(args.runtime_contract),
         )
         _print_json(report)
         return int(CliExitCode.OK)
@@ -444,6 +461,7 @@ def _run_batch_command(args: argparse.Namespace, cancellation: Event) -> int:
         report = collect_batch(
             plan_root=args.plan_root,
             collection_id=args.collection_id,
+            selection=args.selection,
         )
         _print_json(report)
         return int(
@@ -458,6 +476,15 @@ def _run_batch_command(args: argparse.Namespace, cancellation: Event) -> int:
         )
         return int(CliExitCode.OK)
     raise BatchError("Unknown batch command")
+
+
+def _load_runtime_contract(path: str | None) -> RuntimeContract:
+    if path is None:
+        return RuntimeContract()
+    try:
+        return RuntimeContract.model_validate_json(Path(path).read_bytes())
+    except (OSError, ValueError) as exc:
+        raise ValueError("Invalid runtime contract file") from exc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -489,6 +516,21 @@ def _main(argv: Sequence[str] | None, cancellation: Event) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "revalidate":
+            from .revalidation import revalidate
+
+            destination = output_path(args.output_root)
+            report = revalidate(
+                source_manifest=args.source_manifest,
+                runtime_contract=_load_runtime_contract(args.runtime_contract),
+                revalidation_id=args.revalidation_id,
+                output_root=destination,
+            )
+            _print_json(report)
+            evaluation = InvocationResult.model_validate_json(
+                (Path(report["directory"]) / "evaluation.json").read_bytes()
+            )
+            return int(exit_code_for_result(evaluation))
         if args.command == "batch":
             return _run_batch_command(args, cancellation)
         task = _load_task(args.task)

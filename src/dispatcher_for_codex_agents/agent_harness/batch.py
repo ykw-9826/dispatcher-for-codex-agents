@@ -29,6 +29,7 @@ from dispatcher_for_codex_agents.agent_harness.contracts import (
     FailureCode,
     InvocationResult,
     ModelProfile,
+    RuntimeContract,
     validate_local_identifier,
 )
 from dispatcher_for_codex_agents.agent_harness.payload import PayloadBuilder
@@ -47,7 +48,9 @@ from dispatcher_for_codex_agents.agent_harness.schema import (
     validate_json_schema,
     validate_schema_definition,
 )
-from dispatcher_for_codex_agents.agent_harness.shard import ImmutableShardWriter
+from dispatcher_for_codex_agents.agent_harness.shard import read_verified_shard
+
+from .runtime_contract import validate_coverage
 
 PLAN_CONTRACT = "BATCH_LOCAL_EXECUTION_PLAN_V1"
 RETRY_CONTRACT = "BATCH_LOCAL_RETRY_PLAN_V1"
@@ -150,6 +153,7 @@ class BatchPlanSnapshot(_StrictModel):
     expected_output_schema: dict[str, Any]
     profiles: tuple[ProfileRole, ...]
     inputs: tuple[SourceFingerprint, ...]
+    runtime_contract: RuntimeContract = Field(default_factory=RuntimeContract)
 
     @field_validator("batch_id", "task_id_prefix", "base_attempt_id")
     @classmethod
@@ -558,8 +562,12 @@ def plan_batch(
     membership_tsv: str | Path | None = None,
     timeout: float = 600.0,
     adapter_registry: AdapterRegistry | None = None,
+    runtime_contract: RuntimeContract | dict | None = None,
 ) -> dict[str, Any]:
     """Create a sealed deterministic batch execution plan without model calls."""
+    runtime_contract = RuntimeContract.model_validate(
+        runtime_contract if runtime_contract is not None else {}
+    )
     validate_local_identifier(batch_id, field_name="batch_id")
     if shard_size < 1:
         raise BatchError("shard_size must be positive")
@@ -680,6 +688,7 @@ def plan_batch(
         expected_output_schema=schema,
         profiles=profiles,
         inputs=tuple(inputs),
+        runtime_contract=runtime_contract,
     )
     _write_json(
         plan_directory / "batch_plan.snapshot.json",
@@ -723,6 +732,7 @@ def plan_batch(
                 timeout=timeout,
                 call_limit=1,
                 expected_output_schema=specialized_schema,
+                runtime_contract=runtime_contract,
             )
             _write_json(
                 plan_directory / _task_relative_path(profile.profile_id, shard_id),
@@ -895,6 +905,7 @@ def load_batch_plan(raw_root: str | Path) -> LoadedPlan:
                 or task.role != profile.role
                 or task.selected_columns != snapshot.selected_columns
                 or task.call_limit != 1
+                or task.runtime_contract != snapshot.runtime_contract
             ):
                 raise BatchError("AgentTask snapshot differs from batch plan")
             expected_schema = _specialize_schema(
@@ -1006,22 +1017,10 @@ def _attempt_path(plan: LoadedPlan, spec: AttemptSpec) -> Path:
 
 
 def _verify_invocation_shard(path: Path) -> None:
-    if path.is_symlink() or not path.is_dir():
-        raise BatchError("Invocation shard is not a real directory")
-    names = {item.name for item in path.iterdir()}
-    expected = set(ImmutableShardWriter.REQUIRED_FILES)
-    if names != expected:
-        raise BatchError("Invocation shard file set is incomplete or unexpected")
-    rows = _read_tsv(path / "output_sha256.tsv", ("path", "size", "sha256"))
-    if {row["path"] for row in rows} != expected - {"output_sha256.tsv"}:
-        raise BatchError("Invocation output hash manifest coverage mismatch")
-    for row in rows:
-        artifact = path / row["path"]
-        content = artifact.read_bytes()
-        if len(content) != int(row["size"]):
-            raise BatchError("Invocation artifact size mismatch")
-        if hashlib.sha256(content).hexdigest() != row["sha256"]:
-            raise BatchError("Invocation artifact SHA256 mismatch")
+    try:
+        read_verified_shard(path)
+    except ValueError as exc:
+        raise BatchError(str(exc)) from exc
 
 
 def _invocation_result(path: Path) -> InvocationResult:
@@ -1038,10 +1037,6 @@ def _classify_attempt(plan: LoadedPlan, spec: AttemptSpec) -> BatchArtifactStatu
     if not path.exists():
         return BatchArtifactStatus.PLANNED
     if path.is_symlink() or not path.is_dir():
-        return BatchArtifactStatus.RUNNING_OR_INCOMPLETE
-    if {item.name for item in path.iterdir()} != set(
-        ImmutableShardWriter.REQUIRED_FILES
-    ):
         return BatchArtifactStatus.RUNNING_OR_INCOMPLETE
     try:
         _verify_invocation_shard(path)
@@ -1589,7 +1584,9 @@ def _successful_attempts_by_shard(
     return grouped
 
 
-def collect_batch(*, plan_root: str | Path, collection_id: str) -> dict[str, Any]:
+def collect_batch(
+    *, plan_root: str | Path, collection_id: str, selection: str | Path | None = None
+) -> dict[str, Any]:
     """Collect only successful schema-valid shards and fail closed on coverage."""
     validate_local_identifier(collection_id, field_name="collection_id")
     plan = load_batch_plan(plan_root)
@@ -1598,6 +1595,39 @@ def collect_batch(*, plan_root: str | Path, collection_id: str) -> dict[str, Any
         raise BatchError("Collection id already exists; overwrite is forbidden")
     successful = _successful_attempts_by_shard(plan)
     all_specs = _all_attempt_specs(plan)
+    selected = {}
+    selection_snapshot = None
+    if selection is not None:
+        from .revalidation import load_selection
+
+        selection_snapshot = load_selection(selection)
+        by_attempt = {
+            (s.profile.profile_id, s.shard.shard_id, s.attempt_id): s for s in all_specs
+        }
+        expected = {
+            (p.profile_id, s.shard_id)
+            for p in plan.snapshot.profiles
+            for s in plan.shards
+        }
+        for entry in selection_snapshot.selections:
+            key = (entry.profile_id, entry.shard_id)
+            spec = by_attempt.get((*key, entry.attempt_id))
+            if key in selected or spec is None:
+                raise BatchError(
+                    "Duplicate or unknown original/derived shard selection"
+                )
+            selected[key] = entry
+            if (
+                entry.revalidation_directory is None
+                and _classify_attempt(plan, spec) != BatchArtifactStatus.SUCCESS
+            ):
+                raise BatchError("Explicit original selection is not SUCCESS")
+            successful[key] = [spec]
+        if set(selected) != expected:
+            raise BatchError(
+                "Explicit selection must cover every planned "
+                "profile/shard exactly once"
+            )
     long_rows: list[dict[str, Any]] = []
     profile_rows: list[dict[str, Any]] = []
     coverage_rows: list[dict[str, Any]] = []
@@ -1608,6 +1638,7 @@ def collect_batch(*, plan_root: str | Path, collection_id: str) -> dict[str, Any
     }
     collected_by_profile: dict[str, list[str]] = defaultdict(list)
     profile_errors: dict[str, list[str]] = defaultdict(list)
+    interpretation_audit: list[dict] = []
 
     for profile in plan.snapshot.profiles:
         successful_shards = 0
@@ -1625,32 +1656,75 @@ def collect_batch(*, plan_root: str | Path, collection_id: str) -> dict[str, Any
             _verify_invocation_shard(attempt_path)
             task = _load_task(plan, profile.profile_id, shard.shard_id)
             output = _read_json(attempt_path / "final_output.json")
+            original = _invocation_result(attempt_path)
+            audit = {
+                "profile_id": profile.profile_id,
+                "shard_id": shard.shard_id,
+                "attempt_id": spec.attempt_id,
+                "authority_class": profile.authority_class.value,
+                "source": "original",
+                "warnings": list(original.warnings),
+                "evidence": "workers/"
+                + "/".join((spec.task_id, profile.profile_id, spec.attempt_id)),
+                "runtime_interpretation": original.provenance.get(
+                    "runtime_interpretation"
+                ),
+            }
+            choice = selected.get(key)
+            if choice is not None and choice.revalidation_directory is not None:
+                from .revalidation import verify_revalidation
+
+                derived = verify_revalidation(
+                    choice.revalidation_directory, expected_source=attempt_path
+                )
+                if (
+                    derived["status"] != "success"
+                    or derived["coverage_status"] != "PASS"
+                ):
+                    raise BatchError(
+                        "Selected revalidation is not successful "
+                        "with exact-once coverage"
+                    )
+                source_task = AgentTask.model_validate(
+                    _read_json(attempt_path / "agent_task.snapshot.json")
+                )
+                if source_task.model_dump(
+                    exclude={"approved_input_files"}
+                ) != task.model_dump(exclude={"approved_input_files"}):
+                    raise BatchError(
+                        "Source task authority/schema differs from frozen plan"
+                    )
+                fingerprints = _read_tsv(attempt_path / "input_sha256.tsv")
+                expected_bytes = Path(task.approved_input_files[0]).read_bytes()
+                if (
+                    len(fingerprints) != 1
+                    or fingerprints[0]["sha256"]
+                    != hashlib.sha256(expected_bytes).hexdigest()
+                    or int(fingerprints[0]["size"]) != len(expected_bytes)
+                ):
+                    raise BatchError(
+                        "Source input fingerprint differs from frozen plan"
+                    )
+                output = derived["final_output"]
+                audit.update(
+                    source="revalidation",
+                    warnings=derived["warnings"],
+                    evidence=choice.revalidation_directory,
+                    record_sha256=derived["record_sha256"],
+                    runtime_interpretation=derived["runtime_interpretation"],
+                )
             try:
                 validate_json_schema(output, task.expected_output_schema)
             except OutputSchemaError as exc:
                 profile_errors[profile.profile_id].append(f"{shard.shard_id}: {exc}")
                 continue
-            results = output.get("results") if isinstance(output, dict) else None
-            if not isinstance(results, list):
-                profile_errors[profile.profile_id].append(
-                    f"{shard.shard_id}: results is not an array"
-                )
+            try:
+                validate_coverage(output, task.expected_output_schema, shard.record_ids)
+            except ValueError as exc:
+                profile_errors[profile.profile_id].append(f"{shard.shard_id}: {exc}")
                 continue
-            observed = [
-                row.get("record_id")
-                for row in results
-                if isinstance(row, dict) and isinstance(row.get("record_id"), str)
-            ]
-            counts = Counter(observed)
-            missing = sorted(set(shard.record_ids) - set(observed))
-            extra = sorted(set(observed) - set(shard.record_ids))
-            duplicate = sorted(key for key, count in counts.items() if count != 1)
-            if len(observed) != len(shard.record_ids) or missing or extra or duplicate:
-                profile_errors[profile.profile_id].append(
-                    f"{shard.shard_id}: missing={missing}, extra={extra}, "
-                    f"duplicate={duplicate}"
-                )
-                continue
+            results = output["results"]
+            interpretation_audit.append(audit)
             successful_shards += 1
             for record in sorted(results, key=lambda row: row["record_id"]):
                 record_id = record["record_id"]
@@ -1861,7 +1935,20 @@ def collect_batch(*, plan_root: str | Path, collection_id: str) -> dict[str, Any
         "failed_attempt_count": len(failed_rows),
         "profile_count": len(plan.snapshot.profiles),
         "status": collection_status,
+        "warnings": sorted(
+            {warning for entry in interpretation_audit for warning in entry["warnings"]}
+        ),
+        "interpretation_evidence": "result_interpretation_audit.json",
+        "selected_revalidation_count": sum(
+            entry["source"] == "revalidation" for entry in interpretation_audit
+        ),
     }
+    _write_json(destination / "result_interpretation_audit.json", interpretation_audit)
+    if selection_snapshot is not None:
+        _write_json(
+            destination / "selection.snapshot.json",
+            selection_snapshot.model_dump(mode="json"),
+        )
     _write_json(destination / "collection_summary.json", summary)
     _write_hash_manifest(destination, "collection_manifest.tsv")
     _seal_directory(destination)

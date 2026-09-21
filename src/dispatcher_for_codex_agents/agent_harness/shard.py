@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 import stat
@@ -20,6 +22,66 @@ from dispatcher_for_codex_agents.agent_harness.payload import InputRecord
 
 class ShardExistsError(FileExistsError):
     """Raised before invocation when an attempt shard already exists."""
+
+
+def read_verified_shard(path: Path) -> dict[str, bytes]:
+    """Read only known regular artifacts; verify the exact versioned manifest."""
+    try:
+        if (
+            not path.is_absolute()
+            or path.resolve(strict=True) != path
+            or not path.is_dir()
+        ):
+            raise ValueError("Non-canonical shard directory")
+        names = {item.name for item in path.iterdir()}
+        base = set(ImmutableShardWriter.REQUIRED_FILES)
+        extension = {"interpretation.json", "raw_final_output.bin"}
+        if names not in (
+            base,
+            base | extension,
+            base | extension | {"normalized_output.bin"},
+        ):
+            raise ValueError("Invocation shard file set is incomplete or unexpected")
+        data = {}
+        for name in sorted(names):
+            item = path / name
+            metadata = item.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ValueError("Artifact must be a regular non-linked file")
+            data[name] = item.read_bytes()
+        rows = list(
+            csv.DictReader(
+                io.StringIO(data["output_sha256.tsv"].decode("utf-8")), delimiter="\t"
+            )
+        )
+        if len(rows) != len(names) - 1 or {row["path"] for row in rows} != names - {
+            "output_sha256.tsv"
+        }:
+            raise ValueError("Invocation manifest coverage mismatch")
+        for row in rows:
+            content = data[row["path"]]
+            if (
+                len(content) != int(row["size"])
+                or hashlib.sha256(content).hexdigest() != row["sha256"]
+            ):
+                raise ValueError("Invocation artifact hash mismatch")
+        if "interpretation.json" in data:
+            audit = json.loads(data["interpretation.json"])
+            if not isinstance(audit, dict):
+                raise ValueError("Invalid interpretation record")
+            if audit.get(
+                "artifact_contract"
+            ) != "dca.invocation-interpretation/1" or audit.get(
+                "normalized_present"
+            ) is not (
+                "normalized_output.bin" in data
+            ):
+                raise ValueError("Unsupported interpretation artifact layout")
+        return data
+    except (OSError, UnicodeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Invalid or unsafe invocation shard: " + type(exc).__name__
+        ) from exc
 
 
 class ImmutableShardWriter:
@@ -91,10 +153,11 @@ class ImmutableShardWriter:
         task: AgentTask,
         profile: ModelProfile,
         input_records: tuple[InputRecord, ...],
-        events_jsonl: str,
-        stderr_log: str,
+        events_jsonl: str | bytes,
+        stderr_log: str | bytes,
         final_output: Any | None,
         result: InvocationResult,
+        runtime_artifacts: dict[str, bytes] | None = None,
     ) -> Path:
         """Write all required files, hash them, and seal the attempt directory."""
         task_snapshot = task.model_dump(mode="json")
@@ -125,13 +188,35 @@ class ImmutableShardWriter:
         self._write_exclusive(
             "input_sha256.tsv", ("\n".join(input_lines) + "\n").encode("utf-8")
         )
-        self._write_exclusive("events.jsonl", events_jsonl.encode("utf-8"))
-        self._write_exclusive("stderr.log", stderr_log.encode("utf-8"))
+        self._write_exclusive(
+            "events.jsonl",
+            (
+                events_jsonl.encode("utf-8")
+                if isinstance(events_jsonl, str)
+                else events_jsonl
+            ),
+        )
+        self._write_exclusive(
+            "stderr.log",
+            stderr_log.encode("utf-8") if isinstance(stderr_log, str) else stderr_log,
+        )
         self._write_exclusive("final_output.json", self._json_bytes(final_output))
         self._write_exclusive(
             "invocation_result.json",
             (result.model_dump_json(indent=2) + "\n").encode("utf-8"),
         )
+        if runtime_artifacts is not None:
+            if set(runtime_artifacts) not in (
+                {"interpretation.json", "raw_final_output.bin"},
+                {
+                    "interpretation.json",
+                    "raw_final_output.bin",
+                    "normalized_output.bin",
+                },
+            ):
+                raise ValueError("Unexpected runtime artifact set")
+            for name, content in sorted(runtime_artifacts.items()):
+                self._write_exclusive(name, content)
 
         output_lines = ["path\tsize\tsha256"]
         for path in sorted(self.path.iterdir(), key=lambda item: item.name):

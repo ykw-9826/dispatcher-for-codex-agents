@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -33,6 +33,7 @@ from dispatcher_for_codex_agents.agent_harness.contracts import (
     InvocationResult,
     InvocationStatus,
     ModelProfile,
+    RuntimeContract,
     SchemaValidationStatus,
     validate_local_identifier,
 )
@@ -48,13 +49,20 @@ from dispatcher_for_codex_agents.agent_harness.profile import (
 )
 from dispatcher_for_codex_agents.agent_harness.schema import (
     OutputSchemaError,
-    validate_json_schema,
     validate_schema_definition,
 )
 from dispatcher_for_codex_agents.agent_harness.shard import ImmutableShardWriter
 from dispatcher_for_codex_agents.workspace_paths import temporary_root
 
 from .process_guard import record_invocation_process
+from .runtime_contract import (
+    UNKNOWN,
+    canonical_bytes,
+    classify_activity,
+    digest,
+    normalize_output,
+    validate_coverage,
+)
 
 _RATE_LIMIT_PATTERN = re.compile(r"(?:\b429\b|rate[ _-]?limit)", re.IGNORECASE)
 _PREFILL_PATTERN = re.compile(
@@ -99,6 +107,16 @@ def _redact_text(text: str, environment: dict[str, str]) -> str:
         if key.upper().endswith(_SECRET_ENV_SUFFIXES) and len(value) >= 8:
             redacted = redacted.replace(value, f"<REDACTED:{key}>")
     return redacted
+
+
+def _redact_capture(content: bytes, environment: dict[str, str]) -> bytes:
+    """Preserve capture bytes except the existing credential redaction rule."""
+    for key, value in environment.items():
+        if key.upper().endswith(_SECRET_ENV_SUFFIXES) and len(value) >= 8:
+            content = content.replace(
+                value.encode("utf-8"), f"<REDACTED:{key}>".encode()
+            )
+    return content
 
 
 def _warning_lines(stderr: str) -> list[str]:
@@ -194,6 +212,11 @@ def _parse_event_stream(
         if not isinstance(event, dict):
             parse_error = f"line {line_number}: JSONL event must be an object"
             break
+        try:
+            json.dumps(event, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            parse_error = f"line {line_number}: invalid Unicode scalar in JSONL event"
+            break
         events.append(event)
 
     completed = [event for event in events if event.get("type") == "turn.completed"]
@@ -244,6 +267,218 @@ def _parse_event_stream(
     )
 
 
+def evaluate_capture(
+    *,
+    task: AgentTask,
+    profile: ModelProfile,
+    stdout: str | bytes,
+    stderr: str | bytes,
+    cli_version: str,
+    exit_code: int | None,
+    provenance: dict,
+    latency: float = 0,
+    timed_out: bool = False,
+    cancelled: bool = False,
+) -> tuple[InvocationResult, dict[str, bytes]]:
+    """One interpretation path for invocation and immutable revalidation."""
+    capture = stdout.encode("utf-8") if isinstance(stdout, str) else stdout
+    invalid_encoding = False
+    try:
+        stdout = capture.decode("utf-8")
+    except UnicodeDecodeError:
+        stdout = capture.decode("utf-8", errors="replace")
+        invalid_encoding = True
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    contract = RuntimeContract.model_validate(task.runtime_contract)
+    parsed = _parse_event_stream(stdout, task.capability_policy)
+    if invalid_encoding:
+        parsed = replace(parsed, valid_jsonl=False, parse_error="invalid UTF-8 capture")
+    activity = classify_activity(
+        parsed.events,
+        version=cli_version,
+        complete=parsed.valid_jsonl
+        and parsed.turn_completed_count == 1
+        and parsed.terminal_is_last,
+        stderr=stderr,
+    )
+    if (
+        activity["protocol"] != "UNSUPPORTED"
+        and activity["lifecycle"]["issues"]
+        and parsed.turn_completed_count == 1
+    ):
+        # Invalid ordering cannot become success even with the default contract.
+        # Keep the established missing-terminal failure path when no terminal exists.
+        parsed = replace(
+            parsed, valid_jsonl=False, parse_error="invalid thread/turn/item lifecycle"
+        )
+    exemptions = set(activity["confirmed_user_input_rejection_events"])
+    warnings = _warning_lines(stderr)
+    if contract.rejected_user_input == "warn_if_runtime_rejected" and exemptions:
+        violations = [
+            violation
+            for index, event in enumerate(parsed.events)
+            if index not in exemptions
+            for violation in _policy_violations(event, task.capability_policy)
+        ]
+        parsed = replace(parsed, policy_violations=tuple(violations))
+        warnings.extend(
+            f"REQUEST_USER_INPUT_RUNTIME_REJECTED:events.jsonl#/events/{index}"
+            for index in sorted(exemptions)
+        )
+    if UNKNOWN in activity["classifications"]:
+        warnings.append(
+            "TOOL_ACTIVITY_UNKNOWN_OR_INCOMPLETE:interpretation.json#/tool_activity"
+        )
+        # Opt-in never turns unknown execution into warning-success. Defaults
+        # retain the pre-1.0.2 acceptance path and expose conservative diagnostics.
+        if contract != RuntimeContract():
+            parsed = replace(
+                parsed,
+                policy_violations=parsed.policy_violations
+                + ("tool activity not conclusively classified",),
+            )
+    raw = (
+        parsed.final_text.encode("utf-8", errors="surrogatepass")
+        if parsed.final_text is not None
+        else b""
+    )
+    normalized = (
+        normalize_output(raw, task.expected_output_schema, contract)
+        if parsed.final_text is not None
+        else None
+    )
+    schema_status = (
+        SchemaValidationStatus(normalized.schema_status)
+        if normalized
+        else SchemaValidationStatus.NOT_RUN
+    )
+    final_output = normalized.value if normalized else None
+    if (
+        normalized
+        and schema_status == SchemaValidationStatus.PASS
+        and contract != RuntimeContract()
+    ):
+        try:
+            normalized.audit["coverage_status"] = validate_coverage(
+                final_output, task.expected_output_schema
+            )
+        except ValueError:
+            schema_status = SchemaValidationStatus.FAIL
+            normalized.audit["coverage_status"] = "FAIL"
+            warnings.append("EXACT_ONCE_COVERAGE_INVALID")
+    served_model = (
+        parsed.served_models[0] if len(parsed.served_models) == 1 else "NOT_REPORTED"
+    )
+    if served_model == "NOT_REPORTED":
+        warnings.append(FailureCode.SERVED_MODEL_NOT_REPORTED.value)
+    if parsed.parse_error:
+        warnings.append(parsed.parse_error)
+    warnings.extend(parsed.policy_violations)
+    if normalized and normalized.error:
+        warnings.append(normalized.error)
+    combined_errors = (
+        stderr
+        + "\n"
+        + "\n".join(
+            json.dumps(event, ensure_ascii=False, sort_keys=True)
+            for event in parsed.events
+            if event.get("type") in ("error", "turn.failed")
+        )
+    )
+    failure_code = None
+    if cancelled:
+        failure_code = FailureCode.CANCELLED
+    elif timed_out:
+        failure_code = FailureCode.TIMEOUT
+    elif _RATE_LIMIT_PATTERN.search(combined_errors):
+        failure_code = FailureCode.PROVIDER_RATE_LIMIT_429
+    elif _PREFILL_PATTERN.search(combined_errors):
+        failure_code = FailureCode.PROVIDER_PREFILL_PARAMETER_ERROR
+    elif _PARTIAL_PATTERN.search(combined_errors):
+        failure_code = FailureCode.PROVIDER_PARTIAL_PARAMETER_ERROR
+    elif not provenance.get("agent_process_started"):
+        failure_code = FailureCode.CLI_NONZERO_EXIT
+    elif not parsed.valid_jsonl:
+        failure_code = FailureCode.EVENT_STREAM_INVALID
+    elif parsed.policy_violations:
+        failure_code = FailureCode.POLICY_VIOLATION
+    elif exit_code != 0:
+        failure_code = FailureCode.CLI_NONZERO_EXIT
+    elif parsed.turn_completed_count == 0:
+        failure_code = FailureCode.TURN_COMPLETED_MISSING
+    elif len(parsed.served_models) > 1:
+        failure_code = FailureCode.SILENT_FALLBACK_DETECTED
+    else:
+        allowed = profile.capabilities.get(
+            "served_model_allowlist", [provenance.get("configured_model")]
+        )
+        if not isinstance(allowed, list) or not all(
+            isinstance(value, str) for value in allowed
+        ):
+            failure_code = FailureCode.PROFILE_CONFIGURATION_INVALID
+        elif served_model != "NOT_REPORTED" and served_model not in allowed:
+            failure_code = FailureCode.SILENT_FALLBACK_DETECTED
+        elif parsed.final_text is None:
+            failure_code = FailureCode.FINAL_OUTPUT_MISSING
+        elif schema_status != SchemaValidationStatus.PASS:
+            failure_code = FailureCode.OUTPUT_SCHEMA_INVALID
+    locator = next(
+        (
+            index
+            for index in reversed(range(len(parsed.events)))
+            if parsed.events[index].get("type") == "item.completed"
+            and isinstance(parsed.events[index].get("item"), dict)
+            and parsed.events[index]["item"].get("type") == "agent_message"
+            and isinstance(parsed.events[index]["item"].get("text"), str)
+        ),
+        None,
+    )
+    audit = {
+        "artifact_contract": "dca.invocation-interpretation/1",
+        "runtime_contract": contract.model_dump(mode="json"),
+        "runtime_contract_sha256": digest(
+            canonical_bytes(contract.model_dump(mode="json"))
+        ),
+        "captured_events_sha256": digest(capture),
+        "capture_boundary": "CLI stdout bytes after existing credential redaction",
+        "raw_final_present": parsed.final_text is not None,
+        "extraction": {
+            "artifact": "events.jsonl",
+            "event_index": locator,
+            "pointer": "/item/text",
+        },
+        "normalization": normalized.audit if normalized else None,
+        "tool_activity": activity,
+        "normalized_present": bool(
+            normalized and normalized.audit["removed_byte_ranges"]
+        ),
+    }
+    result = InvocationResult(
+        status=InvocationStatus.FAILURE if failure_code else InvocationStatus.SUCCESS,
+        exit_code=exit_code,
+        turn_completed=parsed.turn_completed_count == 1,
+        final_output=final_output,
+        schema_validation_status=schema_status,
+        usage=parsed.usage,
+        provenance={
+            **provenance,
+            "provider_reported_served_model": served_model,
+            "runtime_interpretation": audit,
+        },
+        warnings=tuple(dict.fromkeys(warnings)),
+        failure_code=failure_code,
+        latency_seconds=latency,
+    )
+    artifacts = {
+        "raw_final_output.bin": raw,
+        "interpretation.json": canonical_bytes(audit) + b"\n",
+    }
+    if audit["normalized_present"]:
+        artifacts["normalized_output.bin"] = normalized.validator_bytes
+    return result, artifacts
+
+
 class CodexCliAdapter:
     """Invoke one requested Codex sidecar profile with fail-closed controls."""
 
@@ -275,6 +510,7 @@ class CodexCliAdapter:
         self._cancellation = cancellation or Event()
 
     def preflight(self, *, task: AgentTask, profile: ModelProfile) -> dict[str, Any]:
+        RuntimeContract.model_validate(task.runtime_contract)
         self._runtime_protection = None
         if profile.adapter_id != self.adapter_id:
             raise ValueError("Profile adapter mismatch")
@@ -302,6 +538,9 @@ class CodexCliAdapter:
             capability_policy=task.capability_policy,
         )
         return {
+            "runtime_contract": RuntimeContract.model_validate(
+                task.runtime_contract
+            ).model_dump(mode="json"),
             "configured_model": resolved.configured_model,
             "configured_provider": resolved.configured_provider,
             "profile_compatibility": resolved.provenance(
@@ -514,6 +753,7 @@ class CodexCliAdapter:
             "code_mode_only",
             "code_mode_host",
             "step_model_switching",
+            "default_mode_request_user_input",
         ):
             command.extend(["--disable", feature])
         for feature, enabled in (
@@ -572,7 +812,7 @@ class CodexCliAdapter:
 
     def _terminate_process_group(
         self, process: subprocess.Popen[str]
-    ) -> tuple[str, str]:
+    ) -> tuple[bytes, bytes]:
         try:
             if os.name == "posix":
                 os.killpg(process.pid, signal.SIGTERM)
@@ -707,6 +947,19 @@ class CodexCliAdapter:
             profile_id=profile.profile_id,
             attempt_id=attempt_id,
         )
+        try:
+            RuntimeContract.model_validate(task.runtime_contract)
+        except ValueError:
+            return self._write_prelaunch_failure(
+                writer=writer,
+                task=task,
+                profile=profile,
+                payload=None,
+                resolved=None,
+                cli_version="NOT_PROBED",
+                failure_code=FailureCode.PAYLOAD_INVALID,
+                detail="Runtime contract validation failed",
+            )
         environment = self._environment()
         cli_version = (
             self._read_cli_version(environment)
@@ -827,8 +1080,8 @@ class CodexCliAdapter:
             profile.capabilities.get("native_output_schema", False)
         )
         started = time.monotonic()
-        stdout = ""
-        stderr = ""
+        stdout = b""
+        stderr = b""
         exit_code: int | None = None
         timed_out = False
         cancelled = False
@@ -876,9 +1129,7 @@ class CodexCliAdapter:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+                    text=False,
                     env=environment,
                     cwd=isolated,
                     start_new_session=True,
@@ -893,7 +1144,7 @@ class CodexCliAdapter:
                         attempt_id,
                         child_pid=process.pid,
                     )
-                    input_text: str | None = payload.content
+                    input_text: bytes | None = payload.content.encode("utf-8")
                     deadline = time.monotonic() + task.timeout
                     while True:
                         if self._cancellation.is_set():
@@ -932,120 +1183,31 @@ class CodexCliAdapter:
                 detail=str(exc),
             )
         except OSError as exc:
-            stderr = str(exc)
+            stderr = str(exc).encode("utf-8")
         latency = time.monotonic() - started
 
-        redacted_stdout = _redact_text(stdout or "", environment)
-        redacted_stderr = _redact_text(stderr or "", environment)
-        parsed = _parse_event_stream(redacted_stdout, task.capability_policy)
-
-        final_output: Any | None = None
-        schema_status = SchemaValidationStatus.NOT_RUN
-        schema_error: str | None = None
-        if parsed.final_text is not None:
-            try:
-                final_output = json.loads(parsed.final_text)
-            except json.JSONDecodeError as exc:
-                final_output = parsed.final_text
-                schema_status = SchemaValidationStatus.FAIL
-                schema_error = str(exc)
-            else:
-                try:
-                    validate_json_schema(final_output, task.expected_output_schema)
-                    schema_status = SchemaValidationStatus.PASS
-                except OutputSchemaError as exc:
-                    schema_status = SchemaValidationStatus.FAIL
-                    schema_error = str(exc)
-
-        served_model = (
-            parsed.served_models[0]
-            if len(parsed.served_models) == 1
-            else "NOT_REPORTED"
-        )
-        warnings = _warning_lines(redacted_stderr)
-        if served_model == "NOT_REPORTED":
-            warnings.append(FailureCode.SERVED_MODEL_NOT_REPORTED.value)
-        if parsed.parse_error:
-            warnings.append(parsed.parse_error)
-        warnings.extend(parsed.policy_violations)
-        if schema_error:
-            warnings.append(schema_error)
-
-        error_events = "\n".join(
-            json.dumps(event, ensure_ascii=False, sort_keys=True)
-            for event in parsed.events
-            if event.get("type") in {"error", "turn.failed"}
-        )
-        combined_errors = redacted_stderr + "\n" + error_events
-        failure_code: FailureCode | None
-        if cancelled:
-            failure_code = FailureCode.CANCELLED
-        elif timed_out:
-            failure_code = FailureCode.TIMEOUT
-        elif _RATE_LIMIT_PATTERN.search(combined_errors):
-            failure_code = FailureCode.PROVIDER_RATE_LIMIT_429
-        elif _PREFILL_PATTERN.search(combined_errors):
-            failure_code = FailureCode.PROVIDER_PREFILL_PARAMETER_ERROR
-        elif _PARTIAL_PATTERN.search(combined_errors):
-            failure_code = FailureCode.PROVIDER_PARTIAL_PARAMETER_ERROR
-        elif not process_started:
-            failure_code = FailureCode.CLI_NONZERO_EXIT
-        elif not parsed.valid_jsonl:
-            failure_code = FailureCode.EVENT_STREAM_INVALID
-        elif parsed.policy_violations:
-            failure_code = FailureCode.POLICY_VIOLATION
-        elif exit_code != 0:
-            failure_code = FailureCode.CLI_NONZERO_EXIT
-        elif parsed.turn_completed_count == 0:
-            failure_code = FailureCode.TURN_COMPLETED_MISSING
-        elif len(parsed.served_models) > 1:
-            failure_code = FailureCode.SILENT_FALLBACK_DETECTED
-        else:
-            allowed_served = profile.capabilities.get(
-                "served_model_allowlist", [resolved.configured_model]
-            )
-            if not isinstance(allowed_served, list) or not all(
-                isinstance(value, str) for value in allowed_served
-            ):
-                failure_code = FailureCode.PROFILE_CONFIGURATION_INVALID
-                warnings.append("served_model_allowlist must be a string array")
-            elif served_model != "NOT_REPORTED" and served_model not in allowed_served:
-                failure_code = FailureCode.SILENT_FALLBACK_DETECTED
-                warnings.append(
-                    f"served model {served_model!r} is not in the declared allowlist"
-                )
-            elif parsed.final_text is None:
-                failure_code = FailureCode.FINAL_OUTPUT_MISSING
-            elif schema_status != SchemaValidationStatus.PASS:
-                failure_code = FailureCode.OUTPUT_SCHEMA_INVALID
-            else:
-                failure_code = None
-
-        status = (
-            InvocationStatus.SUCCESS
-            if failure_code is None
-            else InvocationStatus.FAILURE
-        )
-        result = InvocationResult(
-            status=status,
+        redacted_stdout = _redact_capture(stdout or b"", environment)
+        redacted_stderr = _redact_capture(stderr or b"", environment)
+        result, runtime_artifacts = evaluate_capture(
+            task=task,
+            profile=profile,
+            stdout=redacted_stdout,
+            stderr=redacted_stderr,
+            cli_version=cli_version,
             exit_code=exit_code,
-            turn_completed=parsed.turn_completed_count == 1,
-            final_output=final_output,
-            schema_validation_status=schema_status,
-            usage=parsed.usage,
+            latency=latency,
+            timed_out=timed_out,
+            cancelled=cancelled,
             provenance=self._provenance(
                 profile=profile,
                 resolved=resolved,
                 cli_version=cli_version,
-                served_model=served_model,
+                served_model="NOT_REPORTED",
                 native_output_schema=native_output_schema,
                 agent_process_started=process_started,
                 capability_policy=task.capability_policy,
                 compiled_policy=compiled_policy,
             ),
-            warnings=tuple(dict.fromkeys(warnings)),
-            failure_code=failure_code,
-            latency_seconds=latency,
         )
         writer.write(
             task=task,
@@ -1053,7 +1215,8 @@ class CodexCliAdapter:
             input_records=payload.input_records,
             events_jsonl=redacted_stdout,
             stderr_log=redacted_stderr,
-            final_output=final_output,
+            final_output=result.final_output,
             result=result,
+            runtime_artifacts=runtime_artifacts,
         )
         return result

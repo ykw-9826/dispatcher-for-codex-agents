@@ -1,6 +1,6 @@
 # CLI/API contract v1
 
-Distribution: `dispatcher-for-codex-agents`, version `1.0.1` (development).
+Distribution: `dispatcher-for-codex-agents`, version `1.0.2` (development).
 Python namespace: `dispatcher_for_codex_agents`.
 Entry points: `dca`, `dca-notify`.
 Execution API: `dispatcher_for_codex_agents.agent_harness`.
@@ -25,6 +25,14 @@ the production registry. Reserved alternate adapters fail closed. There are no
 dynamic adapter imports, provider fallback or automatic retries.
 
 ## Input and output
+
+`AgentTask.runtime_contract` optionally controls structured output interpretation
+and noninteractive rejected-user-input handling. Defaults remain strict; it grants
+no capabilities. `batch plan --runtime-contract FILE` freezes the same policy in
+every task. `revalidate` writes independent hash-pinned derivatives; collection
+uses `batch collect --selection FILE`, never automatic failure promotion. See the
+[1.0.2 runtime contract](runtime_contract_v1.0.2.md) for exact byte rules, supported
+event evidence, synthetic-only limits and immutable revalidation examples.
 
 `invoke` and `batch run` select a sidecar profile. `--runtime-home`/`--executable`
 and the existing `--codex-home`/`--codex-executable` aliases select the standalone

@@ -193,6 +193,8 @@ def test_success_captures_terminal_usage_and_immutable_hashed_shard(
         "output_sha256.tsv",
         "agent_task.snapshot.json",
         "stderr.log",
+        "interpretation.json",
+        "raw_final_output.bin",
     }
     assert {path.name for path in shard.iterdir()} == expected_files
     assert not os.access(shard, os.W_OK)

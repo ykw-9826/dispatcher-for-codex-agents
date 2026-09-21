@@ -4,7 +4,7 @@ DCA runs independent external model processes for a Codex/GPT controller. It doe
 not replace native same-provider child orchestration. The versioned
 [native capability matrix](native_capabilities.md) explains the current boundary.
 
-Technical baseline: development `dispatcher-for-codex-agents==1.0.1`, namespace
+Technical baseline: development `dispatcher-for-codex-agents==1.0.2`, namespace
 `dispatcher_for_codex_agents`, [contract v1](contract_v1.md). This tool is independent
 of any scientific project. This guide describes capability, not authorization
 to run a real task or alter a production installation.
