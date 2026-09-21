@@ -17,6 +17,7 @@ from dispatcher_for_codex_agents.agent_harness.batch import (
 )
 from dispatcher_for_codex_agents.agent_harness.contracts import (
     AgentTask,
+    CapabilityPolicy,
     FailureCode,
     InvocationResult,
     InvocationStatus,
@@ -32,6 +33,7 @@ __all__ = [
     "BatchError",
     "BatchPlanSnapshot",
     "CodexCliAdapter",
+    "CapabilityPolicy",
     "FailureCode",
     "InvocationResult",
     "InvocationStatus",

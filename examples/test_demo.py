@@ -54,6 +54,9 @@ def run_demo(destination: Path) -> dict:
         temporary = Path(tmp)
         runtime_home = temporary / "fake-runtime"
         runtime_home.mkdir(mode=0o700)
+        (runtime_home / "config.toml").write_text(
+            '[model_providers.fake-provider]\nname="Fake"\n', encoding="utf-8"
+        )
         for profile in ("test-primary", "test-shadow"):
             (runtime_home / f"{profile}.config.toml").write_text(
                 'model="fake-model"\nmodel_provider="fake-provider"\n', encoding="utf-8"

@@ -135,6 +135,8 @@ def emit_batch(
 
 
 def main(argv=None) -> int:
+    from dispatcher_for_codex_agents import __version__
+
     try:
         activate_workspace()
     except (OSError, ValueError):
@@ -151,6 +153,9 @@ def main(argv=None) -> int:
         description=(
             "DCA — Dispatcher for Codex Agents notifications (zero model calls)"
         ),
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
     sub = parser.add_subparsers(dest="command", required=True)
     hook = sub.add_parser("hook")

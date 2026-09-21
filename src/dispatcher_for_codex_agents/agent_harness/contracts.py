@@ -65,6 +65,46 @@ class FailureCode(StrEnum):
     FINAL_OUTPUT_MISSING = "FINAL_OUTPUT_MISSING"
 
 
+class CapabilityPolicy(HarnessModel):
+    """Explicit task authority, distinct from model support/feature hints."""
+
+    read_paths: tuple[str, ...] = ()
+    write_paths: tuple[str, ...] = ()
+    tools: tuple[str, ...] = ()
+
+    @field_validator("read_paths", "write_paths", "tools")
+    @classmethod
+    def _unique(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)) or any(
+            not value or any(c in value for c in "\x00\r\n") for value in values
+        ):
+            raise ValueError("Capability entries must be nonempty and unique")
+        return values
+
+    @field_validator("tools")
+    @classmethod
+    def _tools(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        for value in values:
+            if value not in {
+                "shell",
+                "unified_exec",
+                "web_search",
+            } and not re.fullmatch(r"mcp:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+", value):
+                raise ValueError(f"Unsupported tool capability: {value}")
+            if any(
+                word in value.casefold()
+                for word in ("spawn_agent", "subagent", "collaboration", "recursion")
+            ):
+                raise ValueError("Recursive tools are not supported")
+        if {"shell", "unified_exec"}.issubset(values):
+            raise ValueError("Choose one command execution tool family")
+        return values
+
+    @property
+    def restricted(self) -> bool:
+        return not (self.read_paths or self.write_paths or self.tools)
+
+
 class AgentTask(HarnessModel):
     """Model-agnostic description of one bounded external agent task."""
 
@@ -76,6 +116,7 @@ class AgentTask(HarnessModel):
     timeout: float = Field(gt=0, le=3600)
     call_limit: int = Field(ge=1, le=100)
     expected_output_schema: dict[str, Any]
+    capability_policy: CapabilityPolicy = Field(default_factory=CapabilityPolicy)
 
     @field_validator("task_id")
     @classmethod
@@ -136,6 +177,10 @@ class ModelProfile(HarnessModel):
             "credential",
             "provider",
             "model",
+            "capability_policy",
+            "read_paths",
+            "write_paths",
+            "tools",
         }
 
         def walk(item: Any) -> None:

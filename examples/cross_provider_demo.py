@@ -70,7 +70,10 @@ def run_demo(destination: Path, *, dry_run: bool = False) -> dict:
     agent_executable = host / agent_executable.name
     controller_executable = host / controller_executable.name
     (host / "config.toml").write_text(
-        'model="gpt-6-astra"\nmodel_provider="openai"\n', encoding="utf-8"
+        'model="gpt-6-astra"\nmodel_provider="openai"\n'
+        '[model_providers.example-glm-provider]\nname="Example GLM"\n'
+        '[model_providers.example-deepseek-provider]\nname="Example DeepSeek"\n',
+        encoding="utf-8",
     )
     routes = (
         ("demo-glm", "glm-5.3", "example-glm-provider"),

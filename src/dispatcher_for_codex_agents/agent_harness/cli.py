@@ -23,6 +23,10 @@ from dispatcher_for_codex_agents.agent_harness.batch import (
     run_batch,
     status_batch,
 )
+from dispatcher_for_codex_agents.agent_harness.capabilities import (
+    CapabilityError,
+    validate_paths,
+)
 from dispatcher_for_codex_agents.agent_harness.contracts import (
     AgentTask,
     FailureCode,
@@ -101,8 +105,13 @@ def exit_code_for_result(result: InvocationResult) -> CliExitCode:
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the deliberately small command-line interface."""
+    from dispatcher_for_codex_agents import __version__
+
     parser = argparse.ArgumentParser(
         prog="dca", description="DCA — Dispatcher for Codex Agents"
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     from dispatcher_for_codex_agents.main_agent_bridge.cli import add_parser
@@ -112,7 +121,14 @@ def build_parser() -> argparse.ArgumentParser:
         "invoke",
         help="Run one fresh, bounded external agent through its registered adapter.",
     )
-    invoke.add_argument("--task", required=True, help="AgentTask JSON file.")
+    invoke.add_argument(
+        "--task",
+        required=True,
+        help=(
+            "AgentTask JSON; optional capability_policy grants exact "
+            "read_paths/write_paths/tools (default: none)."
+        ),
+    )
     invoke.add_argument(
         "--profile", required=True, help="External agent sidecar profile id."
     )
@@ -122,7 +138,10 @@ def build_parser() -> argparse.ArgumentParser:
     invoke.add_argument(
         "--dry-run",
         action="store_true",
-        help="Validate without starting Codex or reserving the attempt shard.",
+        help=(
+            "Validate without inference or reserving an attempt; "
+            "capabilities may query local CLI --version."
+        ),
     )
     invoke.add_argument(
         "--runtime-home",
@@ -304,7 +323,7 @@ def _dry_run(
     codex_home: str | None,
     executable: str,
 ) -> dict[str, Any]:
-    del shard_root
+    validate_paths(task.capability_policy, protected=(shard_root,))
     validate_schema_definition(task.expected_output_schema)
     payload = _payload_builder(task).build(task)
     adapter = default_registry().create(
@@ -500,7 +519,12 @@ def _main(argv: Sequence[str] | None, cancellation: Event) -> int:
             profile.adapter_id,
             AdapterSettings(executable, args.codex_home, cancellation=cancellation),
         )
-        adapter.preflight(task=task, profile=profile)
+        try:
+            adapter.preflight(task=task, profile=profile)
+        except (CapabilityError, ProfileResolutionError):
+            # invoke revalidates host configuration before launching and owns the
+            # immutable failure envelope. Dry-run above never reserves a shard.
+            pass
         result = adapter.invoke(
             task=task,
             profile=profile,
@@ -516,10 +540,20 @@ def _main(argv: Sequence[str] | None, cancellation: Event) -> int:
             stream=sys.stderr,
         )
         return int(CliExitCode.SHARD_EXISTS)
+    except ProfileResolutionError as exc:
+        _print_json(
+            {
+                "failure_code": "PROFILE_CONFIGURATION_INVALID",
+                "status": "failure",
+                "warning": str(exc),
+                "profile_compatibility": exc.compatibility,
+            },
+            stream=sys.stderr,
+        )
+        return int(CliExitCode.INPUT_INVALID)
     except (
         OutputSchemaError,
         PayloadBuildError,
-        ProfileResolutionError,
         BatchError,
         ValueError,
     ) as exc:

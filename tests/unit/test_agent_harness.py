@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -92,8 +93,17 @@ def _adapter(tmp_path: Path, mode: str) -> tuple[CodexCliAdapter, AgentTask]:
     codex_home = tmp_path / "codex-home"
     _write_input(input_path)
     _write_codex_home(codex_home)
+    # Portable synthetic standalone installation; no actual Codex or provider.
+    binary = tmp_path / "runtime/packages/standalone/releases/0.test-arch/bin/codex"
+    binary.parent.mkdir(parents=True)
+    binary.write_text(
+        "#!/bin/sh\nexec "
+        + shlex.quote(str(Path(sys.executable).resolve()))
+        + ' "$@"\n'
+    )
+    binary.chmod(0o700)
     adapter = CodexCliAdapter(
-        executable=(sys.executable, str(FAKE_CODEX)),
+        executable=(str(binary), str(FAKE_CODEX)),
         codex_home=codex_home,
         environment={"FAKE_CODEX_MODE": mode, "FAKE_EXPECT_SCHEMA": "1"},
         termination_grace_seconds=0.1,

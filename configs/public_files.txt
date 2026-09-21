@@ -10,6 +10,8 @@ uv.lock
 configs/dca_notifications.example.json
 configs/public_files.txt
 docs/contract_v1.md
+docs/capability_policy.md
+docs/release_notes_v1.0.1.md
 docs/acceptance_policy.md
 docs/native_capabilities.md
 docs/dispatcher_for_codex_agents.md
@@ -49,6 +51,7 @@ src/dispatcher_for_codex_agents/agent_harness/adapter.py
 src/dispatcher_for_codex_agents/agent_harness/batch.py
 src/dispatcher_for_codex_agents/agent_harness/cli.py
 src/dispatcher_for_codex_agents/agent_harness/contracts.py
+src/dispatcher_for_codex_agents/agent_harness/capabilities.py
 src/dispatcher_for_codex_agents/agent_harness/monitoring.py
 src/dispatcher_for_codex_agents/agent_harness/payload.py
 src/dispatcher_for_codex_agents/agent_harness/process_guard.py
@@ -68,6 +71,10 @@ tests/unit/test_public_preparation.py
 tests/unit/test_v1_interface.py
 tests/unit/test_release_candidate.py
 tests/unit/test_agent_harness.py
+tests/unit/test_agent_capabilities.py
+tests/unit/test_codex_runtime_grant.py
+tests/unit/test_runtime_protection.py
+tests/unit/test_profile_compatibility.py
 tests/unit/test_agent_harness_batch.py
 tests/unit/test_agent_harness_cli.py
 tests/unit/test_agent_harness_runtime.py

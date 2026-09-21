@@ -4,7 +4,7 @@ DCA runs independent external model processes for a Codex/GPT controller. It doe
 not replace native same-provider child orchestration. The versioned
 [native capability matrix](native_capabilities.md) explains the current boundary.
 
-Technical baseline: distribution `dispatcher-for-codex-agents==1.0.0`, namespace
+Technical baseline: development `dispatcher-for-codex-agents==1.0.1`, namespace
 `dispatcher_for_codex_agents`, [contract v1](contract_v1.md). This tool is independent
 of any scientific project. This guide describes capability, not authorization
 to run a real task or alter a production installation.
@@ -85,8 +85,10 @@ selector, screening taxonomy or domain acceptance helper. Generic schema, hash
 and exact-once coverage checks remain; they do not approve the meaning of a result.
 See contract v1 for exit codes and current public names.
 
-全部真实任务须另有明确授权。父进程是唯一 writer；只读 external agent、固定输入、hard
-timeout、TERM/KILL、无 recursion/fallback/自动 retry 的边界不变。领域筛选辅助模块已
+全部真实任务须另有明确授权。父进程仍是唯一结果 artifact writer；默认 external agent
+只处理 stdin，不使用工具。单任务可以通过 [capability_policy](capability_policy.md)
+明确授权文件读写范围和工具。hard timeout、TERM/KILL、无 recursion/fallback/自动 retry
+的边界不变。领域筛选辅助模块已
 移除；业务字段由调用者提供。格式、覆盖和角色隔离检查不代表模型结论已获批准。
 
 ## Public interface and test demos / 公共接口与测试 Demo

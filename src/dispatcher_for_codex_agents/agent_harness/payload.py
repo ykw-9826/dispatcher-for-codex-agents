@@ -148,9 +148,15 @@ class PayloadBuilder:
             + _canonical_json(
                 {
                     "agent_recursion": "forbidden",
-                    "filesystem_access": "forbidden",
+                    "filesystem_access": (
+                        "forbidden"
+                        if task.capability_policy.restricted
+                        else task.capability_policy.model_dump(
+                            mode="json", exclude={"tools"}
+                        )
+                    ),
                     "output": "single_json_object_only",
-                    "tools": "forbidden",
+                    "tools": list(task.capability_policy.tools) or "forbidden",
                 }
             ),
         ]
@@ -184,7 +190,12 @@ class PayloadBuilder:
         lines.extend(
             [
                 "INSTRUCTION Return exactly one JSON object matching "
-                "EXPECTED_OUTPUT_SCHEMA. Do not use tools or access files.",
+                "EXPECTED_OUTPUT_SCHEMA. "
+                + (
+                    "Do not use tools or access files."
+                    if task.capability_policy.restricted
+                    else "Use only the explicit POLICY grants; no recursive agents."
+                ),
                 "DCA_AGENT_TASK_END",
                 "",
             ]

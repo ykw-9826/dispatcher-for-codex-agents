@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 
@@ -15,7 +16,7 @@ def emit(value: dict[str, object]) -> None:
 
 
 if "--version" in sys.argv:
-    print("fake-codex 0.1.0")
+    print("fake-codex 0.153.4")
     raise SystemExit(0)
 
 arguments = sys.argv[1:]
@@ -23,11 +24,29 @@ call_log = os.environ.get("FAKE_CODEX_CALL_LOG")
 if call_log:
     with Path(call_log).open("a", encoding="utf-8") as handle:
         handle.write("agent_subprocess\n")
+configs = {}
+
+
+def merge_config(target: dict, update: dict) -> None:
+    for key, value in update.items():
+        if isinstance(value, dict):
+            merge_config(target.setdefault(key, {}), value)
+        else:
+            target[key] = value
+
+
+for i, flag in enumerate(arguments[:-1]):
+    if flag == "--config":
+        merge_config(configs, tomllib.loads(arguments[i + 1]))
+named_policy = configs.get("default_permissions") == "dca_task"
 required_pairs = {
-    "--sandbox": "read-only",
     "--ask-for-approval": "never",
     "--color": "never",
 }
+if not named_policy:
+    required_pairs["--sandbox"] = "read-only"
+elif "--sandbox" in arguments:
+    raise SystemExit("legacy sandbox mixed with named policy")
 expected_profile = os.environ.get("FAKE_EXPECT_PROFILE")
 if expected_profile is not None:
     required_pairs["--profile"] = expected_profile
@@ -60,7 +79,7 @@ disabled = {
     for index, value in enumerate(arguments[:-1])
     if value == "--disable"
 }
-if not {
+required_disabled = {
     "apps",
     "browser_use",
     "computer_use",
@@ -68,9 +87,10 @@ if not {
     "image_generation",
     "multi_agent",
     "plugins",
-    "shell_tool",
-    "unified_exec",
-}.issubset(disabled):
+}
+if not named_policy:
+    required_disabled.update({"shell_tool", "unified_exec"})
+if not required_disabled.issubset(disabled):
     print("required no-tool feature flags were not disabled", file=sys.stderr)
     raise SystemExit(95)
 
@@ -192,7 +212,47 @@ if mode == "policy":
         }
     )
 
-if mode == "schema_invalid":
+if mode == "capability":
+    # Emulates a cooperative host from compiled TOML, not an OS isolation test.
+    permission = configs["permissions"]["dca_task"]
+    assert permission["network"]["enabled"] is False
+    assert configs["shell_environment_policy"]["inherit"] == "none"
+    assert "shell_snapshot" in disabled
+    operation = os.environ.get("FAKE_CAP_OPERATION", "read")
+    target = Path(os.environ["FAKE_CAP_PATH"])
+    grants = permission["filesystem"]
+    allowed = any(
+        not root.startswith(":")
+        and (
+            target == Path(root)
+            or (Path(root).is_dir() and target.is_relative_to(root))
+        )
+        and (operation != "write" or access == "write")
+        for root, access in grants.items()
+    )
+    allowed &= "shell_tool" not in disabled
+    if allowed:
+        if operation == "write":
+            target.write_text("fixture write", encoding="utf-8")
+        reason = target.read_text(encoding="utf-8")
+    else:
+        reason = "PERMISSION_DENIED"
+    emit(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "fixture-command",
+                "status": "completed" if allowed else "failed",
+                "exit_code": 0 if allowed else 1,
+            },
+        }
+    )
+    output = {"decision": "TYPE_A", "reason": reason}
+elif mode == "allowed_event":
+    emit({"type": "item.completed", "item": json.loads(os.environ["FAKE_CAP_EVENT"])})
+    output = {"decision": "TYPE_A", "reason": "fixture event"}
+elif mode == "schema_invalid":
     output = {"decision": "MAYBE", "reason": "invalid enum"}
 elif mode == "success_science_terms":
     output = {"decision": "TYPE_A", "reason": "Item 429 used partial prefill."}

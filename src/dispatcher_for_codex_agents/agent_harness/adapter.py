@@ -16,8 +16,19 @@ from pathlib import Path
 from threading import Event
 from typing import Any
 
+from dispatcher_for_codex_agents.agent_harness.capabilities import (
+    CapabilityError,
+    InternalRuntimeGrant,
+    SelectedRuntimeProtectionScope,
+    event_violation,
+    host_overrides,
+    policy_record,
+    redacted_command,
+    validate_paths,
+)
 from dispatcher_for_codex_agents.agent_harness.contracts import (
     AgentTask,
+    CapabilityPolicy,
     FailureCode,
     InvocationResult,
     InvocationStatus,
@@ -118,25 +129,47 @@ def _extract_served_models(event: dict[str, Any]) -> set[str]:
     return values
 
 
-def _policy_violations(event: dict[str, Any]) -> list[str]:
+def _policy_violations(
+    event: dict[str, Any], policy: CapabilityPolicy | None = None
+) -> list[str]:
+    policy = policy or CapabilityPolicy()
     violations: list[str] = []
     event_type = event.get("type")
     if not isinstance(event_type, str):
         return ["event type is missing or non-string"]
     folded_type = event_type.casefold()
+    if event_type not in {
+        "thread.started",
+        "turn.started",
+        "turn.completed",
+        "turn.failed",
+        "error",
+        "item.started",
+        "item.updated",
+        "item.completed",
+    }:
+        violations.append(f"unrecognized event type: {event_type}")
     if any(
-        token in folded_type
-        for token in ("subagent", "spawn_agent", "collaboration", "mcp_tool")
+        token in folded_type for token in ("subagent", "spawn_agent", "collaboration")
     ):
         violations.append(f"forbidden event type: {event_type}")
+    if event_type in _FORBIDDEN_ITEM_TYPES or event_type.endswith("_tool_call"):
+        violation = event_violation(event, policy)
+        if violation:
+            violations.append(violation)
 
     item = event.get("item")
     if isinstance(item, dict):
         item_type = item.get("type")
-        if isinstance(item_type, str) and (
-            item_type in _FORBIDDEN_ITEM_TYPES or item_type.endswith("_tool_call")
-        ):
-            violations.append(f"forbidden item type: {item_type}")
+        if not isinstance(item_type, str) or item_type not in {
+            "agent_message",
+            "reasoning",
+            "todo_list",
+            "error",
+        }:
+            violation = event_violation(item, policy)
+            if violation:
+                violations.append(violation)
         command = item.get("command")
         if isinstance(command, str) and re.search(
             r"(?:^|[\s/])codex(?:\s|$)", command, re.IGNORECASE
@@ -145,7 +178,9 @@ def _policy_violations(event: dict[str, Any]) -> list[str]:
     return violations
 
 
-def _parse_event_stream(stdout: str) -> _ParsedEvents:
+def _parse_event_stream(
+    stdout: str, policy: CapabilityPolicy | None = None
+) -> _ParsedEvents:
     events: list[dict[str, Any]] = []
     parse_error: str | None = None
     for line_number, raw_line in enumerate(stdout.splitlines(), start=1):
@@ -169,7 +204,7 @@ def _parse_event_stream(stdout: str) -> _ParsedEvents:
     violations: list[str] = []
     for event in events:
         served_models.update(_extract_served_models(event))
-        violations.extend(_policy_violations(event))
+        violations.extend(_policy_violations(event, policy))
         item = event.get("item")
         if (
             event.get("type") == "item.completed"
@@ -234,9 +269,13 @@ class CodexCliAdapter:
         self._termination_grace_seconds = termination_grace_seconds
         self._calls_started: dict[tuple[str, str], int] = {}
         self._cli_version: str | None = None
+        self._internal_runtime_grant: InternalRuntimeGrant | None = None
+        self._runtime_scope: SelectedRuntimeProtectionScope | None = None
+        self._runtime_protection: dict | None = None
         self._cancellation = cancellation or Event()
 
     def preflight(self, *, task: AgentTask, profile: ModelProfile) -> dict[str, Any]:
+        self._runtime_protection = None
         if profile.adapter_id != self.adapter_id:
             raise ValueError("Profile adapter mismatch")
         if shutil.which(self._executable[0]) is None:
@@ -252,17 +291,30 @@ class CodexCliAdapter:
             or not all(isinstance(item, str) and item for item in served)
         ):
             raise ValueError("served_model_allowlist must be a nonempty string array")
+        # Normalize profile read/decode errors before capability compilation or
+        # a local version probe, including for dry-run's pre-reservation path.
         resolved = self._resolver.resolve(profile.profile_id)
+        command, compiled = self._build_command(
+            profile=profile,
+            isolated_working_directory=Path(temporary_root())
+            / "EPHEMERAL_ISOLATED_DIRECTORY",
+            schema_path=Path("output_schema.json") if native else None,
+            capability_policy=task.capability_policy,
+        )
         return {
             "configured_model": resolved.configured_model,
             "configured_provider": resolved.configured_provider,
-            "command": list(
-                self.build_command(
-                    profile=profile,
-                    isolated_working_directory=Path("EPHEMERAL_ISOLATED_DIRECTORY"),
-                    schema_path=Path("output_schema.json") if native else None,
-                )
+            "profile_compatibility": resolved.provenance(
+                self._cli_version or "NOT_PROBED"
             ),
+            "capability_policy": policy_record(
+                task.capability_policy,
+                applied=False,
+                compiled=compiled,
+                runtime_protection=self._runtime_protection,
+            ),
+            "command": redacted_command(command),
+            "command_preview_redacted": True,
         }
 
     @property
@@ -284,7 +336,15 @@ class CodexCliAdapter:
             return self._cli_version
         try:
             completed = subprocess.run(
-                [*self._executable, "--version"],
+                [
+                    (
+                        self._internal_runtime_grant.path
+                        if self._internal_runtime_grant is not None
+                        else self._executable[0]
+                    ),
+                    *self._executable[1:],
+                    "--version",
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -299,31 +359,121 @@ class CodexCliAdapter:
             self._cli_version = "NOT_REPORTED"
         return self._cli_version
 
+    def _runtime_support(self) -> InternalRuntimeGrant:
+        """Pin a canonical executable; never add a launcher symlink or parent."""
+        selected = self._executable[0]
+        if not Path(selected).is_absolute():
+            if Path(selected).name != selected:
+                raise CapabilityError("Selected Codex executable must be absolute")
+            selected = (
+                shutil.which(selected, path=self._environment().get("PATH")) or ""
+            )
+        grant = InternalRuntimeGrant.capture(selected)
+        if self._internal_runtime_grant is None:
+            self._internal_runtime_grant = grant
+        elif self._internal_runtime_grant != grant:
+            raise CapabilityError("Selected Codex executable changed after preflight")
+        return self._internal_runtime_grant
+
+    def _protect_runtime(
+        self, policy: CapabilityPolicy, grant: InternalRuntimeGrant
+    ) -> None:
+        # Runs before even the version subprocess. Layout failure must not start
+        # an unknown executable; failure provenance never becomes an applied grant.
+        self._runtime_protection = {
+            "selected_executable": grant.path,
+            "canonical_executable": grant.path,
+            "runtime_layout": "UNRESOLVED",
+            "protected_root": None,
+            "derivation_method": "canonical_standalone_release_suffix_v1",
+            "codex_version": self._cli_version or "NOT_PROBED",
+            "purpose": "USER_GRANT_DENY_BOUNDARY_NOT_A_GRANT",
+            "user_grants_check": "NOT_PERFORMED",
+        }
+        scope = SelectedRuntimeProtectionScope.derive(grant)
+        if self._runtime_scope is not None and self._runtime_scope != scope:
+            raise CapabilityError("Selected runtime protection scope changed")
+        self._runtime_scope = scope
+        self._runtime_protection = scope.record(
+            grant, self._cli_version or "NOT_PROBED"
+        )
+        try:
+            validate_paths(
+                policy,
+                protected=(
+                    self._resolver.codex_home,
+                    Path(grant.path),
+                    Path(scope.protected_root),
+                ),
+            )
+        except (ValueError, OSError):
+            self._runtime_protection["user_grants_check"] = "REJECTED"
+            raise
+        self._runtime_protection["user_grants_check"] = "PASS"
+
     def build_command(
         self,
         *,
         profile: ModelProfile,
         isolated_working_directory: Path,
         schema_path: Path | None,
+        capability_policy: CapabilityPolicy | None = None,
     ) -> tuple[str, ...]:
+        return self._build_command(
+            profile=profile,
+            isolated_working_directory=isolated_working_directory,
+            schema_path=schema_path,
+            capability_policy=capability_policy,
+        )[0]
+
+    def _build_command(
+        self,
+        *,
+        profile: ModelProfile,
+        isolated_working_directory: Path,
+        schema_path: Path | None,
+        capability_policy: CapabilityPolicy | None = None,
+    ) -> tuple[tuple[str, ...], dict]:
         """Build the only permitted fresh, ephemeral `codex exec` command."""
+        self._runtime_protection = None
+        policy = capability_policy or CapabilityPolicy()
+        # model_copy()/model_construct() must not bypass the authority validator.
+        policy = CapabilityPolicy.model_validate(policy.model_dump(mode="json"))
+        # Validate user authority before deriving a separate runtime dependency.
+        validate_paths(policy, protected=(self._resolver.codex_home,))
+        runtime = self._runtime_support() if not policy.restricted else None
+        if runtime is not None:
+            self._protect_runtime(policy, runtime)
+        compiled: dict = {}
+        overrides = host_overrides(
+            policy,
+            home=self._resolver.codex_home,
+            profile_id=profile.profile_id,
+            cwd=isolated_working_directory,
+            compiled=compiled,
+            internal_runtime_grant=runtime,
+            cli_version=(
+                self._read_cli_version(self._environment())
+                if not policy.restricted
+                else None
+            ),
+        )
+        if self._runtime_protection is not None:
+            self._runtime_protection["codex_version"] = (
+                self._cli_version or "NOT_PROBED"
+            )
         command = [
-            *self._executable,
+            runtime.path if runtime is not None else self._executable[0],
+            *self._executable[1:],
             "--strict-config",
             "--profile",
             profile.profile_id,
-            "--sandbox",
-            "read-only",
             "--ask-for-approval",
             "never",
             "--cd",
             str(isolated_working_directory),
             "--disable",
             "multi_agent",
-            "--disable",
-            "shell_tool",
-            "--disable",
-            "unified_exec",
             "--disable",
             "plugins",
             "--disable",
@@ -336,22 +486,89 @@ class CodexCliAdapter:
             "computer_use",
             "--disable",
             "image_generation",
+            "--disable",
+            "shell_snapshot",
             "--config",
             "mcp_servers={}",
             "--config",
             "notify=[]",
-            "exec",
-            "--ephemeral",
-            "--ignore-rules",
-            "--skip-git-repo-check",
-            "--json",
-            "--color",
-            "never",
         ]
+        if policy.restricted:
+            command.extend(["--sandbox", "read-only"])
+        # Independent host features must not hitchhike on a command/web/MCP grant.
+        for feature in (
+            "multi_agent_v2",
+            "request_permissions_tool",
+            "shell_snapshot_v2",
+            "skill_mcp_dependency_install",
+            "skill_search",
+            "workspace_dependencies",
+            "view_image",
+            "goals",
+            "sleep_tool",
+            "tool_suggest",
+            "remote_plugin",
+            "browser_use_external",
+            "browser_use_full_cdp_access",
+            "code_mode",
+            "code_mode_only",
+            "code_mode_host",
+            "step_model_switching",
+        ):
+            command.extend(["--disable", feature])
+        for feature, enabled in (
+            ("shell_tool", bool({"shell", "unified_exec"} & set(policy.tools))),
+            ("unified_exec", "unified_exec" in policy.tools),
+        ):
+            command.extend(["--enable" if enabled else "--disable", feature])
+        overrides += [
+            (
+                'web_search="live"'
+                if "web_search" in policy.tools
+                else 'web_search="disabled"'
+            ),
+            'shell_environment_policy.inherit="none"',
+            "shell_environment_policy.set={}",
+            "shell_environment_policy.include_only=[]",
+            "shell_environment_policy.ignore_default_excludes=false",
+        ]
+        for override in overrides:
+            command.extend(["--config", override])
+        command.extend(
+            [
+                "exec",
+                "--ephemeral",
+                "--ignore-rules",
+                "--skip-git-repo-check",
+                "--json",
+                "--color",
+                "never",
+            ]
+        )
         if schema_path is not None:
             command.extend(["--output-schema", str(schema_path)])
         command.append("-")
-        return tuple(command)
+        # Derive feature states from the emitted argv rather than copying grants.
+        compiled.update(
+            {
+                "features": {
+                    command[i + 1]: flag == "--enable"
+                    for i, flag in enumerate(command[:-1])
+                    if flag in {"--enable", "--disable"}
+                },
+                "approval": "never",
+                "web_search": "live" if "web_search" in policy.tools else "disabled",
+                "network": {"shell": False},
+                "agent_recursion": False,
+                "shell_environment_policy": {
+                    "inherit": "none",
+                    "set": {},
+                    "include_only": [],
+                    "ignore_default_excludes": False,
+                },
+            }
+        )
+        return tuple(command), compiled
 
     def _terminate_process_group(
         self, process: subprocess.Popen[str]
@@ -375,8 +592,8 @@ class CodexCliAdapter:
                 pass
             return process.communicate()
 
-    @staticmethod
     def _provenance(
+        self,
         *,
         profile: ModelProfile,
         resolved: ResolvedSidecarProfile | None,
@@ -384,6 +601,9 @@ class CodexCliAdapter:
         served_model: str,
         native_output_schema: bool,
         agent_process_started: bool,
+        capability_policy: CapabilityPolicy,
+        compiled_policy: dict | None = None,
+        profile_compatibility: dict | None = None,
     ) -> dict[str, Any]:
         return {
             "adapter_id": profile.adapter_id,
@@ -395,6 +615,11 @@ class CodexCliAdapter:
                 resolved.configured_provider if resolved is not None else "NOT_REPORTED"
             ),
             "codex_cli_version": cli_version,
+            "profile_compatibility": (
+                resolved.provenance(cli_version)
+                if resolved is not None
+                else {**(profile_compatibility or {}), "codex_cli_version": cli_version}
+            ),
             "ephemeral": True,
             "fallback_profiles": [],
             "multi_agent": False,
@@ -406,7 +631,15 @@ class CodexCliAdapter:
             "agent_subprocess_count": int(agent_process_started),
             "resume": False,
             "agent_working_directory": "EPHEMERAL_ISOLATED_DIRECTORY",
-            "sandbox": "read-only",
+            "sandbox": (
+                "read-only" if capability_policy.restricted else "named:dca_task"
+            ),
+            "capability_policy": policy_record(
+                capability_policy,
+                applied=agent_process_started,
+                compiled=compiled_policy,
+                runtime_protection=self._runtime_protection,
+            ),
         }
 
     def _write_prelaunch_failure(
@@ -420,6 +653,7 @@ class CodexCliAdapter:
         cli_version: str,
         failure_code: FailureCode,
         detail: str,
+        profile_compatibility: dict | None = None,
     ) -> InvocationResult:
         environment = self._environment()
         redacted_detail = _redact_text(detail, environment)
@@ -437,6 +671,8 @@ class CodexCliAdapter:
                 served_model="NOT_REPORTED",
                 native_output_schema=False,
                 agent_process_started=False,
+                capability_policy=task.capability_policy,
+                profile_compatibility=profile_compatibility,
             ),
             warnings=(redacted_detail, FailureCode.SERVED_MODEL_NOT_REPORTED.value),
             failure_code=failure_code,
@@ -463,6 +699,7 @@ class CodexCliAdapter:
         payload_builder: PayloadBuilder | None = None,
     ) -> InvocationResult:
         """Run one bounded agent call and always emit one terminal shard."""
+        self._runtime_protection = None
         validate_local_identifier(attempt_id, field_name="attempt_id")
         writer = ImmutableShardWriter(
             workers_root=workers_root,
@@ -471,7 +708,11 @@ class CodexCliAdapter:
             attempt_id=attempt_id,
         )
         environment = self._environment()
-        cli_version = self._read_cli_version(environment)
+        cli_version = (
+            self._read_cli_version(environment)
+            if task.capability_policy.restricted
+            else "NOT_PROBED"
+        )
         if self._cancellation.is_set():
             return self._write_prelaunch_failure(
                 writer=writer,
@@ -537,6 +778,32 @@ class CodexCliAdapter:
                 cli_version=cli_version,
                 failure_code=FailureCode.PROFILE_CONFIGURATION_INVALID,
                 detail=str(exc),
+                profile_compatibility=exc.compatibility,
+            )
+
+        try:
+            validate_paths(
+                task.capability_policy,
+                protected=(self._resolver.codex_home, Path(workers_root)),
+            )
+            self.build_command(
+                profile=profile,
+                isolated_working_directory=Path(temporary_root())
+                / "EPHEMERAL_ISOLATED_DIRECTORY",
+                schema_path=None,
+                capability_policy=task.capability_policy,
+            )
+            cli_version = self._cli_version or cli_version
+        except (ValueError, OSError) as exc:
+            return self._write_prelaunch_failure(
+                writer=writer,
+                task=task,
+                profile=profile,
+                payload=payload,
+                resolved=resolved,
+                cli_version=cli_version,
+                failure_code=FailureCode.POLICY_VIOLATION,
+                detail=str(exc),
             )
 
         call_key = (task.task_id, profile.profile_id)
@@ -566,6 +833,7 @@ class CodexCliAdapter:
         timed_out = False
         cancelled = False
         process_started = False
+        compiled_policy: dict | None = None
         try:
             with tempfile.TemporaryDirectory(
                 prefix="dca-agent-", dir=temporary_root()
@@ -585,10 +853,11 @@ class CodexCliAdapter:
                         encoding="utf-8",
                     )
                     schema_path.chmod(0o444)
-                command = self.build_command(
+                command, compiled_policy = self._build_command(
                     profile=profile,
                     isolated_working_directory=isolated,
                     schema_path=schema_path,
+                    capability_policy=task.capability_policy,
                 )
                 record_invocation_process(
                     Path(workers_root),
@@ -597,6 +866,11 @@ class CodexCliAdapter:
                     attempt_id,
                     child_pid=None,
                 )
+                if not task.capability_policy.restricted:
+                    # Recheck immediately before Popen; no re-selection/fallback.
+                    self._protect_runtime(
+                        task.capability_policy, self._runtime_support()
+                    )
                 process = subprocess.Popen(
                     command,
                     stdin=subprocess.PIPE,
@@ -646,13 +920,24 @@ class CodexCliAdapter:
                     self._terminate_process_group(process)
                     raise
                 exit_code = process.returncode
+        except CapabilityError as exc:
+            return self._write_prelaunch_failure(
+                writer=writer,
+                task=task,
+                profile=profile,
+                payload=payload,
+                resolved=resolved,
+                cli_version=cli_version,
+                failure_code=FailureCode.POLICY_VIOLATION,
+                detail=str(exc),
+            )
         except OSError as exc:
             stderr = str(exc)
         latency = time.monotonic() - started
 
         redacted_stdout = _redact_text(stdout or "", environment)
         redacted_stderr = _redact_text(stderr or "", environment)
-        parsed = _parse_event_stream(redacted_stdout)
+        parsed = _parse_event_stream(redacted_stdout, task.capability_policy)
 
         final_output: Any | None = None
         schema_status = SchemaValidationStatus.NOT_RUN
@@ -755,6 +1040,8 @@ class CodexCliAdapter:
                 served_model=served_model,
                 native_output_schema=native_output_schema,
                 agent_process_started=process_started,
+                capability_policy=task.capability_policy,
+                compiled_policy=compiled_policy,
             ),
             warnings=tuple(dict.fromkeys(warnings)),
             failure_code=failure_code,

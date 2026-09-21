@@ -16,6 +16,22 @@ from dispatcher_for_codex_agents.notifications.core import NotificationEvent
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("command", ["dca", "dca-notify"])
+def test_cli_version_matches_packaging_authority(command, capsys):
+    import tomllib
+    from importlib.metadata import version
+
+    from dispatcher_for_codex_agents import __version__
+    from dispatcher_for_codex_agents.notifications.cli import main as notify_main
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    assert project["version"] == __version__ == version(project["name"]) == "1.0.1"
+    with pytest.raises(SystemExit) as result:
+        (main if command == "dca" else notify_main)(["--version"])
+    assert result.value.code == 0
+    assert capsys.readouterr().out.strip() == f"{command} {__version__}"
+
+
 def test_metadata_warning_is_not_served_identity_or_semantic_approval():
     events = [
         {"type": "thread.started", "model": "configured-example"},
@@ -92,6 +108,10 @@ def test_two_profile_dry_run_never_launches_a_process(tmp_path, monkeypatch, cap
     task_path.write_text(task.model_dump_json())
     home = tmp_path / "host"
     home.mkdir()
+    (home / "config.toml").write_text(
+        '[model_providers.external-alpha]\nname="Alpha"\n'
+        '[model_providers.external-beta]\nname="Beta"\n'
+    )
     for name in ("alpha", "beta"):
         (home / f"{name}.config.toml").write_text(
             f'model="test-{name}"\nmodel_provider="external-{name}"\n'

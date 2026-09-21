@@ -147,6 +147,7 @@ def _plan(
 def _fake_home(root: Path, profiles: int = 3) -> Path:
     home = root / "codex-home"
     home.mkdir()
+    (home / "config.toml").write_text('[model_providers.fake-provider]\nname="Fake"\n')
     for profile in _profiles(profiles):
         (home / f"{profile['profile_id']}.config.toml").write_text(
             'model = "fake-model"\nmodel_provider = "fake-provider"\n',

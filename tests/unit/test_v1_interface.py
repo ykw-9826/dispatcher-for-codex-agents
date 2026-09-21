@@ -43,7 +43,7 @@ def test_public_names_and_no_legacy_runtime_api(tmp_path):
     assert project["scripts"]["dca"] == (
         "dispatcher_for_codex_agents.agent_harness.cli:main"
     )
-    assert project["version"] == "1.0.0"
+    assert project["version"] == "1.0.1"
     source = tmp_path / "records.tsv"
     source.write_text("record_id\tvalue\nSYN-001\t7\n")
     task = AgentTask(
@@ -70,7 +70,7 @@ def test_public_names_and_no_legacy_runtime_api(tmp_path):
 
 def test_installed_identity_without_old_public_aliases():
     distribution = importlib.metadata.distribution("dispatcher-for-codex-agents")
-    assert distribution.version == "1.0.0"
+    assert distribution.version == "1.0.1"
     assert {entry.name for entry in distribution.entry_points} == {"dca", "dca-notify"}
     assert build_parser().prog == "dca"
     assert "DCA — Dispatcher for Codex Agents" in build_parser().format_help()

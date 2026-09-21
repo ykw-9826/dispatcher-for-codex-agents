@@ -60,7 +60,7 @@ Codex/GPT controller -> DCA -> GLM external agent      -> checked results
                            -> DeepSeek external agent -> controller summary
 ```
 
-DCA writes result files; external agents receive only selected input over stdin. Failed attempts are kept intact. Cancellation, missing or expired permission, or another writer owning the controller thread blocks continuation. See [operations](docs/dispatcher_for_codex_agents.md) and [contract v1](docs/contract_v1.md) for the details.
+DCA writes result files; external agents receive selected input over stdin by default. Single-task capability policies can explicitly authorize bounded file and tool access. Failed attempts are kept intact. Cancellation, missing or expired permission, or another writer owning the controller thread blocks continuation. See [operations](docs/dispatcher_for_codex_agents.md) and [contract v1](docs/contract_v1.md) for the details.
 
 ## CLI
 
@@ -81,7 +81,7 @@ DCA writes result files; external agents receive only selected input over stdin.
 - Only `CodexCliAdapter` is production-ready. Alternate runtime adapters are not implemented; reserved adapters fail closed.
 - Continuation works only in a **dedicated DCA-owned controller thread**. It cannot wake an arbitrary existing IDE Codex conversation.
 - No main-model polling does **not** mean free inference. External model work and controller continuations still cost money.
-- Current external agents receive read-only, no-tool tasks. DCA does not build a generic native agent tree or recursively delegate work.
+- External agents default to read-only, no-tool tasks; explicit single-task [capability policies](docs/capability_policy.md) can authorize bounded file/tool access on supported hosts. DCA does not build a generic native agent tree or recursively delegate work.
 - Linux has been tested locally; Windows and macOS are not verified. Bridge support depends on the installed Codex App Server interface.
 - DCA does not make scientific decisions for you, silently switch models, or retry failed work without approval.
 
@@ -157,7 +157,7 @@ Codex/GPT 主控制器 -> DCA -> GLM 外部 Agent      -> 校验结果
                         -> DeepSeek 外部 Agent -> 主控制器汇总
 ```
 
-结果文件统一由 DCA 写入，外部 Agent 只经 stdin 接收选定输入。失败记录不会覆盖；任务取消、权限缺失或到期、控制器线程已有其他 writer 时，都不会自动继续。详细用法见[操作与恢复](docs/dispatcher_for_codex_agents.md)和 [contract v1](docs/contract_v1.md)。
+结果文件统一由 DCA 写入，外部 Agent 默认经 stdin 接收选定输入；单任务可显式授权限定范围的文件与工具访问。失败记录不会覆盖；任务取消、权限缺失或到期、控制器线程已有其他 writer 时，都不会自动继续。详细用法见[操作与恢复](docs/dispatcher_for_codex_agents.md)和 [contract v1](docs/contract_v1.md)。
 
 ## CLI
 
@@ -178,7 +178,7 @@ Codex/GPT 主控制器 -> DCA -> GLM 外部 Agent      -> 校验结果
 - 目前只有 `CodexCliAdapter` 可用于生产。其他 runtime adapter 未实现，选择预留 adapter 会 fail closed。
 - 自动续接仅限 **DCA 拥有的专用 controller thread**，不能唤醒任意已经打开的 IDE Codex 对话。
 - 没有主模型轮询，**不等于推理免费**。外部模型执行和主控制器续接仍有费用。
-- 当前外部 Agent 只处理只读、禁用工具的任务；DCA 不自建通用原生 Agent 树，也不递归派发任务。
+- 外部 Agent 默认只读、禁用工具；单任务可在支持的宿主上通过 [capability policy](docs/capability_policy.md) 显式授权文件范围和工具。DCA 不自建通用原生 Agent 树，也不递归派发任务。
 - 目前在 Linux 本地验证过，尚未验证 Windows/macOS。bridge 需要所安装的 Codex App Server 接口支持。
 - 科学判断由你来做。DCA 不会悄悄切换模型，也不会未经批准重试失败任务。
 
