@@ -25,7 +25,7 @@ def test_cli_version_matches_packaging_authority(command, capsys):
     from dispatcher_for_codex_agents.notifications.cli import main as notify_main
 
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-    assert project["version"] == __version__ == version(project["name"]) == "1.0.2"
+    assert project["version"] == __version__ == version(project["name"]) == "1.0.3"
     with pytest.raises(SystemExit) as result:
         (main if command == "dca" else notify_main)(["--version"])
     assert result.value.code == 0

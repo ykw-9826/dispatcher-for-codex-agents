@@ -29,9 +29,13 @@ PUBLIC_HOSTS = {
     "learn.chatgpt.com",
     "developers.openai.com",
     "sctapi.ftqq.com",
+    "sc3.ft07.com",
+    "open.dingtalk.com",
+    "oapi.dingtalk.com",
 }
 PUBLIC_REPOSITORY_URLS = {
     "https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/agent/role.rs",
+    "https://github.com/easychen/serverchan-sdk",
 }
 
 
@@ -54,17 +58,44 @@ def inspect_content(name: str, content: bytes) -> list[str]:
     for label, pattern in patterns.items():
         if re.search(pattern, text):
             findings.append(label)
-    for match in re.findall(r"\bSCT[A-Za-z0-9]{8,256}\b", text):
+    for match in re.findall(
+        r"\b(?:SCT[A-Za-z0-9]{8,256}|sctp[0-9]+t[A-Za-z0-9]{8,256})\b", text
+    ):
         if not (
-            name.startswith("tests/") and re.fullmatch("SCT" r"FAKESECRET\d*", match)
+            name.startswith("tests/")
+            and re.fullmatch(r"(?:SCT|sctp123t)FAKESECRET[0-9]*", match)
         ):
             findings.append("SERVERCHAN_KEY")
+    for match in re.findall(r"\bSEC[A-Za-z0-9]{8,256}\b", text):
+        if not (name.startswith("tests/") and re.fullmatch(r"SECFAKE[0-9]+", match)):
+            findings.append("DINGTALK_SIGNING_SECRET")
+    for match in re.findall(r"access_token=([A-Za-z0-9_-]+)", text):
+        if not (name.startswith("tests/") and re.fullmatch(r"FAKE[0-9]+", match)):
+            findings.append("DINGTALK_ACCESS_TOKEN")
     for url in re.findall(r'https?://[^\s<>"\x27)]+', text):
-        parsed = urlparse(url)
+        # The reviewed SC3 endpoint template contains an indexing expression,
+        # not an IPv6 literal; urlparse must not interpret its brackets as one.
+        if (
+            name
+            in {
+                "src/dispatcher_for_codex_agents/notifications/sinks.py",
+                "scripts/public_snapshot.py",
+            }
+            and url == "https://{match[1]}.push.ft07.com/send/{key}.send"
+        ):
+            continue
+        try:
+            parsed = urlparse(url.replace(r"\.", "."))
+        except ValueError:
+            findings.append("INVALID_PUBLIC_URL")
+            continue
         if parsed.username or parsed.password:
             findings.append("URL_CREDENTIALS")
         if (
             parsed.hostname not in PUBLIC_HOSTS
+            and not re.fullmatch(
+                r"[1-9][0-9]{0,19}\.push\.ft07\.com", parsed.hostname or ""
+            )
             and not (parsed.hostname or "").endswith(".invalid")
             and url not in PUBLIC_REPOSITORY_URLS
         ):

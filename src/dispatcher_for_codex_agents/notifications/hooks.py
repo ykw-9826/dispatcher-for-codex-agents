@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import ast
+import configparser
 import copy
+import email.parser
 import fcntl
 import hashlib
+import io
 import json
 import os
+import re
 import shlex
+import stat
 import time
+import tokenize
 import tomllib
 from contextlib import nullcontext
 from pathlib import Path
@@ -16,10 +23,11 @@ from pathlib import Path
 from dispatcher_for_codex_agents.workspace_paths import workspace_root
 
 from .core import external_path, ledger, storage_path
+from .sinks import HOOK_TIMEOUT_SECONDS
 
 EVENTS = ("UserPromptSubmit", "Stop", "SessionEnd", "Interrupt", "PermissionRequest")
 MARKER = "DCA — Dispatcher for Codex Agents notification"
-# Detection only, never an accepted alias or a migration of an installed hook.
+# Explicit migration detection only; never a public command alias.
 RETIRED_MARKER = "Denovo Codex Agent Tool notification"
 
 
@@ -132,7 +140,7 @@ def install_hooks(
             handler = {
                 "type": "command",
                 "command": command,
-                "timeout": 3,
+                "timeout": HOOK_TIMEOUT_SECONDS,
                 "statusMessage": MARKER,
             }
             existing = [
@@ -185,6 +193,282 @@ def install_hooks(
             "status": "HOOKS_INSTALLED_PENDING_TRUST",
             "receipt": str(receipt),
         }
+
+
+def _launcher_structure(body: str, namespace: str) -> None:
+    """Accept only console-wrapper ASTs, never arbitrary code containing tokens."""
+    try:
+        nodes = ast.parse(body).body
+    except (SyntaxError, ValueError):
+        raise ValueError("RELEASE_LAUNCHER_INVALID") from None
+
+    def tree(node):
+        return ast.dump(node, include_attributes=False)
+
+    def statements(source):
+        return [tree(node) for node in ast.parse(source).body]
+
+    allowed_imports = {
+        statements("import sys")[0]: "sys",
+        statements("import re")[0]: "re",
+        statements(f"from {namespace}.notifications.cli import main")[0]: "main",
+    }
+    imports = set()
+    while nodes and isinstance(nodes[0], (ast.Import, ast.ImportFrom)):
+        name = allowed_imports.get(tree(nodes.pop(0)))
+        if name is None or name in imports:
+            raise ValueError("RELEASE_LAUNCHER_INVALID")
+        imports.add(name)
+    if not {"sys", "main"} <= imports:
+        raise ValueError("RELEASE_LAUNCHER_INVALID")
+    if len(nodes) == 1 and isinstance(nodes[0], ast.If):
+        guard = nodes[0]
+        if guard.orelse or tree(guard.test) != tree(
+            ast.parse('__name__ == "__main__"', mode="eval").body
+        ):
+            raise ValueError("RELEASE_LAUNCHER_INVALID")
+        nodes = guard.body
+    if not nodes or tree(nodes[-1]) not in {
+        statements("sys.exit(main())")[0],
+        statements("raise SystemExit(main())")[0],
+    }:
+        raise ValueError("RELEASE_LAUNCHER_INVALID")
+    # uv's suffix/slice normalization and pip/distlib's re.sub normalization.
+    # Compare whole statements, including destinations, slices, arguments, guards
+    # and branches: an otherwise-correct import/call cannot hide extra logic.
+    prefix = [tree(node) for node in nodes[:-1]]
+    uv = statements(
+        'if sys.argv[0].endswith("-script.pyw"):\n'
+        "    sys.argv[0] = sys.argv[0][:-11]\n"
+        'elif sys.argv[0].endswith(".exe"):\n'
+        "    sys.argv[0] = sys.argv[0][:-4]\n"
+    )
+    pip = [
+        statements(f"sys.argv[0] = re.sub({pattern!r}, '', sys.argv[0])")
+        for pattern in (r"(-script\.pyw|\.exe)?$", r"(-script\.pyw?|\.exe)?$")
+    ]
+    if prefix not in ([], uv) and not ("re" in imports and prefix in pip):
+        raise ValueError("RELEASE_LAUNCHER_INVALID")
+
+
+def _release_executable(value: str, *, destination: bool) -> dict:
+    """Read-only identity check. Never run an unknown executable for validation."""
+    path = Path(value)
+    if not path.is_absolute() or path.resolve() != path:
+        raise ValueError("CANONICAL_RELEASE_EXECUTABLE_REQUIRED")
+    info = path.stat()
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.getuid()
+        or not os.access(path, os.X_OK)
+    ):
+        raise ValueError("RELEASE_EXECUTABLE_INVALID")
+    # Retired names are recognized only for explicitly requested migration.
+    legacy = path.name == "b2m-notify"
+    if path.name not in {"dca-notify", "b2m-notify"} or (destination and legacy):
+        raise ValueError("UNKNOWN_NOTIFICATION_EXECUTABLE")
+    venv = path.parent.parent
+    release = venv.parent
+    if (
+        path.parent.name != "bin"
+        or venv.name != "venv"
+        or release.parent.name != "releases"
+        or not re.fullmatch(r"[0-9a-f]{7,40}", release.name)
+    ):
+        raise ValueError("COMMIT_ADDRESSED_RELEASE_REQUIRED")
+    distribution = (
+        "denovo-codex-agent-tool" if legacy else "dispatcher-for-codex-agents"
+    )
+    namespace = "denovo_codex_agent_tool" if legacy else "dispatcher_for_codex_agents"
+    metadata = list(
+        (venv / "lib").glob(
+            "python*/site-packages/"
+            + distribution.replace("-", "_")
+            + "-*.dist-info/METADATA"
+        )
+    )
+    if len(metadata) != 1 or metadata[0].resolve() != metadata[0]:
+        raise ValueError("RELEASE_METADATA_INVALID")
+    msg = email.parser.BytesParser().parsebytes(metadata[0].read_bytes())
+    if msg["Name"] != distribution or msg["Version"] not in (
+        {"1.0.3"} if destination else {"1.0.0", "1.0.1", "1.0.2", "1.0.3"}
+    ):
+        raise ValueError("RELEASE_VERSION_INVALID")
+    entries = configparser.ConfigParser()
+    entries.read_string((metadata[0].parent / "entry_points.txt").read_text())
+    if (
+        entries.get("console_scripts", path.name)
+        != namespace + ".notifications.cli:main"
+    ):
+        raise ValueError("RELEASE_ENTRYPOINT_INVALID")
+    raw = path.read_bytes()
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(raw).readline)
+        if encoding not in {"utf-8", "utf-8-sig"}:
+            raise ValueError
+        body = raw.decode(encoding)
+    except (SyntaxError, UnicodeError, ValueError):
+        raise ValueError("RELEASE_LAUNCHER_INVALID") from None
+    interpreter = Path(body.split("\n", 1)[0].removeprefix("#!"))
+    if (
+        not raw.startswith(b"#!")
+        or not body.startswith("#!" + str(interpreter) + "\n")
+        or interpreter.parent != venv / "bin"
+        or not re.fullmatch(r"python(?:3(?:\.[0-9]+)?)?", interpreter.name)
+    ):
+        raise ValueError("RELEASE_LAUNCHER_INVALID")
+    _launcher_structure(body, namespace)
+    if not interpreter.is_file():
+        raise ValueError("RELEASE_PYTHON_MISSING")
+    return {
+        "path": str(path),
+        "sha256": _digest(raw),
+        "distribution": distribution,
+        "version": msg["Version"],
+    }
+
+
+def migrate_hooks(
+    codex_home: str,
+    executable: str,
+    config_path: str,
+    *,
+    from_executables: tuple[str, ...],
+    expected_sha256: str | None = None,
+    apply: bool = False,
+) -> dict:
+    """Explicit three-hook migration, preview first. No trust/secret/ledger reads."""
+    target_identity = _release_executable(executable, destination=True)
+    sources = {s: _release_executable(s, destination=False) for s in from_executables}
+    if len(sources) != len(from_executables):
+        raise ValueError("DUPLICATE_MIGRATION_SOURCE")
+    accepted = {**sources, executable: target_identity}
+    home = external_path(codex_home)
+    target = external_path(home / "hooks.json")
+    original = target.read_bytes()
+    document = json.loads(original)
+    config = storage_path(config_path)
+    config_bytes = config.read_bytes()  # non-secret config only, never load sinks
+    base = external_path(home / "config.toml")
+    base_bytes = base.read_bytes() if base.exists() else None
+    parsed = tomllib.loads(base_bytes.decode()) if base_bytes else {}
+    if parsed.get("notify") or any(
+        n in json.dumps(parsed.get("hooks", {}))
+        for n in (MARKER, RETIRED_MARKER, "b2m-notify", "dca-notify")
+    ):
+        raise ValueError("CONFLICTING_HOST_NOTIFICATION_REGISTRATION")
+    if not isinstance(document, dict) or not isinstance(document.get("hooks"), dict):
+        raise ValueError("HOOK_CONFIG_INVALID")
+    merged = copy.deepcopy(document)
+    changes = []
+    events = {"UserPromptSubmit", "Stop", "PermissionRequest"}
+    for event, groups in merged["hooks"].items():
+        if not isinstance(groups, list):
+            raise ValueError("HOOK_CONFIG_INVALID")
+        recognized = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                raise ValueError("HOOK_CONFIG_INVALID")
+            for handler in group["hooks"]:
+                if not isinstance(handler, dict):
+                    raise ValueError("HOOK_CONFIG_INVALID")
+                if any(
+                    n in json.dumps(handler)
+                    for n in (MARKER, RETIRED_MARKER, "b2m-notify", "dca-notify")
+                ):
+                    if (
+                        event not in events
+                        or set(group) != {"hooks"}
+                        or len(group["hooks"]) != 1
+                    ):
+                        raise ValueError("UNKNOWN_LEGACY_HOOK_STATE")
+                    args = shlex.split(handler.get("command", ""))
+                    if (
+                        not args
+                        or args[0] not in accepted
+                        or args
+                        != [args[0], "hook", "--event", event, "--config", str(config)]
+                        or handler["command"] != shlex.join(args)
+                    ):
+                        raise ValueError("UNKNOWN_LEGACY_EXECUTABLE_OR_ARGS")
+                    if (
+                        set(handler) != {"type", "command", "timeout", "statusMessage"}
+                        or handler["type"] != "command"
+                        or handler["statusMessage"] not in (MARKER, RETIRED_MARKER)
+                        or type(handler["timeout"]) is not int
+                        or handler["timeout"] not in (3, HOOK_TIMEOUT_SECONDS)
+                    ):
+                        raise ValueError("UNKNOWN_LEGACY_HOOK_STATE")
+                    recognized.append(handler)
+        if event in events:
+            if len(recognized) != 1:
+                raise ValueError("MISSING_OR_DUPLICATE_DCA_HANDLER")
+            handler = recognized[0]
+            desired = {
+                "type": "command",
+                "command": shlex.join(
+                    [executable, "hook", "--event", event, "--config", str(config)]
+                ),
+                "timeout": HOOK_TIMEOUT_SECONDS,
+                "statusMessage": MARKER,
+            }
+            if handler != desired:
+                changes.append(
+                    {"event": event, "before": dict(handler), "after": desired}
+                )
+                handler.clear()
+                handler.update(desired)
+    if not events <= set(merged["hooks"]):
+        raise ValueError("MISSING_DCA_HANDLER")
+    preview = {
+        "status": "HOOK_MIGRATION_PREVIEW",
+        "changed": bool(changes),
+        "previous_sha256": _digest(original),
+        "changes": changes,
+        "source_identities": list(sources.values()),
+        "target_identity": target_identity,
+        "trust_status": "USER_REVIEW_REQUIRED",
+        "config_modified": False,
+        "ledger_modified": False,
+    }
+    if not apply or not changes:
+        return preview
+    if expected_sha256 != _digest(original):
+        raise ValueError("MIGRATION_PREVIEW_HASH_REQUIRED_OR_CHANGED")
+    operation = _operation_root(home)
+    operation.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with ledger(operation / ".denovo-hook-installer"):
+        if (
+            target.read_bytes() != original
+            or config.read_bytes() != config_bytes
+            or (base.read_bytes() if base.exists() else None) != base_bytes
+        ):
+            raise ValueError("CONCURRENT_MIGRATION_CHANGE")
+        if any(
+            _release_executable(p, destination=(p == executable)) != identity
+            for p, identity in accepted.items()
+        ):
+            raise ValueError("RELEASE_EXECUTABLE_CHANGED")
+        stamp = str(time.time_ns())
+        backup = operation / ("hooks.json.dca-backup-" + stamp)
+        _exclusive(backup, original)
+        updated = (json.dumps(merged, sort_keys=True, indent=2) + "\n").encode()
+        receipt = operation / ("dca-hooks-receipt-" + stamp + ".json")
+        value = {
+            **preview,
+            "target": str(target),
+            "backup": str(backup),
+            "previous_exists": True,
+            "installed_sha256": _digest(updated),
+        }
+        _exclusive(receipt, (json.dumps(value, sort_keys=True) + "\n").encode())
+        _replace(target, updated, original)
+    return {
+        **preview,
+        "status": "HOOKS_MIGRATED_PENDING_TRUST",
+        "receipt": str(receipt),
+    }
 
 
 def rollback_hooks(receipt_path: str, *, apply: bool = False) -> dict:

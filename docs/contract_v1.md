@@ -1,6 +1,6 @@
 # CLI/API contract v1
 
-Distribution: `dispatcher-for-codex-agents`, version `1.0.2` (development).
+Distribution: `dispatcher-for-codex-agents`, version `1.0.3` (development).
 Python namespace: `dispatcher_for_codex_agents`.
 Entry points: `dca`, `dca-notify`.
 Execution API: `dispatcher_for_codex_agents.agent_harness`.
@@ -170,6 +170,37 @@ Notification selection uses `DCA_NOTIFY_CONFIG`, `DCA_NOTIFY_SESSION_ID` and
 execution status. Hooks remain opt-in and require host trust. Send failures are
 non-blocking; do not reset/replay event or delivery ledgers.
 
+Notification config version stays 1. Its optional
+`permission_notification_policy` is OFF by default or REQUEST_OBSERVED; unknown
+values fail closed. OFF is the intentional safety-default change from the old
+raw-PermissionRequest human-action alert. It changes no Codex permission decision.
+Missing policy does not change Turbo/GenericWebhook config or Stop event identity.
+`permission_request_observed`/`OBSERVED` is distinct from `human_action_required`;
+the latter remains valid for explicit harness action events. Permission diagnostics
+use local observation IDs and allowlisted tool categories, no raw input content.
+
+Up to three stable sink identities share the original delivery ledger. Root
+JSON/schema, duplicate/missing identity and ledger integrity errors fail globally;
+enabled sink configuration/secret errors become NOT_ATTEMPTED, while dispatched
+transport uncertainty remains DELIVERY_UNKNOWN. Each sink is isolated, with no
+automatic retry. SCT/SC3 use distinct fixed HTTPS endpoints; DingTalk is a separate
+one-way signed/explicit-unsigned protocol, not a GenericWebhook wire change.
+Every delivery-shaped ledger row must have a lowercase SHA256 outer `event_id`,
+matching nested `event_id` when present, and sufficient nested identity fields to
+recompute the same ID through `NotificationEvent`. The full ledger is checked
+before any observation append, duplicate decision, reservation or sink construction;
+identity corruption returns `LEDGER_IDENTITY_CORRUPTION` without sending or rewriting
+history. Legacy context/observation rows without delivery keys do not participate
+in dedupe and need no invented identity. Legacy presentation flags do not affect
+the hash. This preserves readable v1.0.0–v1.0.2 delivery envelopes, not unprovable IDs.
+
+After sink construction the parent pins a safe `protocol` label to the pre-send
+reservation and every transport/deadline/abnormal-child result. The earlier
+NOT_ATTEMPTED identity reservation precedes sink construction and cannot claim a
+protocol yet. No endpoint, credential or raw exception text is part of provenance.
+Service acceptance does not certify mobile delivery. Details and migration CLI
+are in [operations](dispatcher_for_codex_agents.md#notifications-and-safe-integration--通知与集成).
+
 Exit codes: 0 success; 2 input/config invalid; 10 provider failure; 11 timeout;
 12 CLI/batch failure; 13 terminal/event failure; 14 schema/coverage failure;
 15 policy; 16 existing shard; 17 bridge blocked; 130 cancellation.
@@ -187,8 +218,10 @@ artifact names are removed, without compatibility aliases. Existing installation
 plans, bridge specs, hooks and history are not migrated automatically. Finish an
 old run with its pinned old release. Prepare new specs/plans for this interface;
 never mix old attempts into a new collection or replay a delivery ledger.
-An installed retired notification hook blocks new hook installation; remove it
-only through a separately authorized operation. Internal on-disk mutex names stay
+An installed retired notification hook blocks ordinary hook installation. Only
+the separately authorized, preview/hash-gated `hooks-migrate` can replace the
+three recognized definitions; it never migrates config/ledger or grants trust.
+Internal on-disk mutex names stay
 stable across releases to preserve single-writer exclusion, not as public aliases.
 
 Workspace paths remain deployer-selected canonical paths. Use a private workspace

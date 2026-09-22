@@ -218,6 +218,18 @@ def test_snapshot_privacy_scanner_and_fake_credential_exception():
     assert "SERVERCHAN_KEY" in inspect("docs/sample.md", b"SCTFAKESECRET1234")
 
 
+def test_multichannel_privacy_scanner():
+    inspect = load_script("scripts/public_snapshot.py").inspect_content
+    assert inspect("tests/unit/fake.py", b"sctp123tFAKESECRET1234") == []
+    assert "SERVERCHAN_KEY" in inspect("docs/sample.md", b"sctp123tFAKESECRET1234")
+    key = "sctp456t" + "NOTREAL12345678"
+    assert "SERVERCHAN_KEY" in inspect("tests/unit/fake.py", key.encode())
+    token = "access_token=" + "NOTREAL12345678"
+    assert "DINGTALK_ACCESS_TOKEN" in inspect("docs/sample.md", token.encode())
+    signing = "SEC" + "NOTREAL12345678"
+    assert "DINGTALK_SIGNING_SECRET" in inspect("tests/unit/fake.py", signing.encode())
+
+
 def test_approved_public_repository_does_not_allow_unreviewed_github_urls():
     snapshot = load_script("scripts/public_snapshot.py")
     for url in snapshot.PUBLIC_REPOSITORY_URLS:
@@ -237,4 +249,4 @@ def test_approved_mit_license_and_package_metadata():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert project["license"] == "MIT"
     assert project["license-files"] == ["LICENSE"]
-    assert project["version"] == "1.0.2"
+    assert project["version"] == "1.0.3"

@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from dispatcher_for_codex_agents.workspace_paths import (
@@ -14,14 +15,21 @@ from dispatcher_for_codex_agents.workspace_paths import (
     workspace_root,
 )
 
-from .core import NotificationEvent, identifier, notify, record_context
+from .core import (
+    NotificationEvent,
+    identifier,
+    ledger,
+    load_config,
+    notify,
+    record_context,
+)
 
 HOOK_KINDS = {
     "UserPromptSubmit": ("turn_started", "STARTED"),
     "Stop": ("turn_completed", "COMPLETED"),
     "SessionEnd": ("session_ended", "COMPLETED"),
     "Interrupt": ("interrupted", "INTERRUPTED"),
-    "PermissionRequest": ("human_action_required", "REQUIRED"),
+    "PermissionRequest": ("permission_request_observed", "OBSERVED"),
     "SubagentStop": ("subagent_stopped", "COMPLETED"),
 }
 
@@ -42,6 +50,48 @@ def hook_event(name: str, raw: dict, config_path: str):
     turn = identifier(raw.get("turn_id"))
     if not session:
         raise ValueError("HOST_SESSION_ID_REQUIRED")
+    if name == "PermissionRequest":
+        config = load_config(config_path)
+        policy = config.get("permission_notification_policy", "OFF")
+        event = NotificationEvent(
+            source="codex",
+            kind="permission_request_observed",
+            status="OBSERVED",
+            session_id=session,
+            turn_id=turn,
+            attempt_id="observation-" + uuid.uuid4().hex,
+        )
+        tool = raw.get("tool_name")
+        category = (
+            "shell"
+            if tool == "Bash"
+            else (
+                "file_edit"
+                if tool in ("apply_patch", "Edit", "Write")
+                else (
+                    "mcp"
+                    if isinstance(tool, str) and tool.startswith("mcp__")
+                    else "other"
+                )
+            )
+        )
+        # No stable per-request ID is promised by the host contract. Record a
+        # local observation ID, not a claim of request-level exactly-once.
+        with ledger(config["ledger_directory"]) as (_, append):
+            append(
+                {
+                    "permission_observation": True,
+                    "event": event.payload(),
+                    "policy": policy,
+                    "tool_category": category,
+                    "human_wait_status": "NOT_ESTABLISHED",
+                    "identity_source": "LOCAL_OBSERVATION",
+                    "recorded_at": time.time(),
+                }
+            )
+        if policy == "OFF":
+            return {"status": "PERMISSION_NOTIFICATION_OFF", "model_calls": 0}
+        return notify(event, config_path)
     context = record_context(
         config_path,
         session_id=session,
@@ -180,9 +230,30 @@ def main(argv=None) -> int:
     restore = sub.add_parser("hooks-rollback")
     restore.add_argument("--receipt", required=True)
     restore.add_argument("--apply", action="store_true")
+    migrate = sub.add_parser(
+        "hooks-migrate",
+        help="Preview explicit three-hook release migration; never trust automatically",
+    )
+    migrate.add_argument("--codex-home", required=True)
+    migrate.add_argument("--config", required=True)
+    migrate.add_argument("--executable", required=True)
+    migrate.add_argument("--from-executable", action="append", required=True)
+    migrate.add_argument("--expected-sha256")
+    migrate.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
     try:
-        if args.command == "hooks-install":
+        if args.command == "hooks-migrate":
+            from .hooks import migrate_hooks
+
+            result = migrate_hooks(
+                args.codex_home,
+                args.executable,
+                args.config,
+                from_executables=tuple(args.from_executable),
+                expected_sha256=args.expected_sha256,
+                apply=args.apply,
+            )
+        elif args.command == "hooks-install":
             from .hooks import install_hooks
 
             result = install_hooks(

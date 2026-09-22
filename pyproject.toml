@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dispatcher-for-codex-agents"
-version = "1.0.2"
+version = "1.0.3"
 description = "Cross-provider external model execution and event-driven Codex continuation."
 readme = "README.md"
 license = "MIT"

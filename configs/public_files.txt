@@ -72,6 +72,7 @@ tests/unit/test_workspace_paths.py
 tests/unit/test_independent_project.py
 tests/unit/test_main_agent_bridge.py
 tests/unit/test_notifications.py
+tests/unit/test_notifications_v103.py
 tests/unit/test_public_preparation.py
 tests/unit/test_v1_interface.py
 tests/unit/test_release_candidate.py

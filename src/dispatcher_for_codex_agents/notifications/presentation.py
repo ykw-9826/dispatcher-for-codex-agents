@@ -4,7 +4,8 @@ from datetime import UTC, datetime
 
 TITLES = {
     "turn_started": "本轮开始",
-    "turn_completed": "本轮回复结束",
+    "turn_completed": "Codex 本轮结束",
+    "permission_request_observed": "权限请求",
     "session_ended": "主线程结束",
     "interrupted": "任务中断",
     "subagent_stopped": "原生子线程结束",
@@ -27,6 +28,7 @@ def present(event) -> dict[str, str]:
         "INTERRUPTED": "已中断",
         "REQUIRED": "需要人工操作",
         "TEST": "工具验收",
+        "OBSERVED": "已观察到权限请求；审批结果未确认",
     }[event.status]
     metrics = event.metrics
     progress = (
@@ -40,6 +42,8 @@ def present(event) -> dict[str, str]:
         else "未提供"
     )
     todo = "查看本地结果；不自动进入下一阶段"
+    if event.kind == "permission_request_observed":
+        todo = "由 Codex 审批流程处理；本通知不作批准或拒绝"
     if event.kind in {
         "batch_failed",
         "shard_failed",

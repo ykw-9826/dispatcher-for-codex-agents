@@ -244,8 +244,14 @@ def test_missing_config_and_repository_config(tmp_path):
     )
     path = config(tmp_path)
     (tmp_path / ".git").write_text("gitdir: elsewhere")
-    with pytest.raises(ValueError, match="OUTSIDE_REPOSITORY"):
-        load_config(path)
+    # Root/identity validation is separate from sink-local secret policy.
+    # Neither inline repository credential may be sent.
+    result = notify(event(), path, sender=lambda *_: pytest.fail("inline secret"))
+    assert all(
+        r["delivery_status"] == "NOT_ATTEMPTED"
+        and r["failure_code"] == "CONFIGURATION_ERROR"
+        for r in result["sinks"].values()
+    )
 
 
 def test_secure_config_symlink_and_unknown_fields(tmp_path):

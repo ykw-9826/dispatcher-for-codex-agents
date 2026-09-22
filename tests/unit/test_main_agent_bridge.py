@@ -475,7 +475,7 @@ def test_notification_chinese_template_contains_no_ids_or_body():
         session_id="PRIVATE_LONG_SESSION_ID",
     )
     output = present(item)
-    assert output["title"] == "[DCA] 本轮回复结束"
+    assert output["title"] == "[DCA] Codex 本轮结束"
     assert "PRIVATE" not in str(output)
     assert "不代表结果已获批准" in output["body"]
     closed = NotificationEvent(
