@@ -16,7 +16,7 @@ import ssl
 import time
 from dataclasses import dataclass, field
 from typing import Protocol
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 SOCKET_TIMEOUT_SECONDS = 0.5
 SINK_DEADLINE_SECONDS = 0.9
@@ -27,11 +27,20 @@ HOOK_TIMEOUT_SECONDS = 4
 
 
 def serverchan_endpoint(key: str) -> tuple[str, str]:
-    if re.fullmatch(r"SCT[A-Za-z0-9]{8,256}", key):
-        return "serverchan_turbo", "https://sctapi.ftqq.com/" + key + ".send"
-    match = re.fullmatch(r"sctp([1-9][0-9]{0,19})t[A-Za-z0-9]{8,256}", key)
+    # Keep the loader's printable-ASCII envelope, not a vendor token alphabet.
+    # Reject path/query/fragment separators (including proxy-normalized backslash).
+    if not isinstance(key, str) or any(
+        not 33 <= ord(c) <= 126 or c in "/?#\\" for c in key
+    ):
+        raise ValueError("SERVERCHAN_KEY_FORMAT_INVALID")
+    # Encode one path segment, including literal '%' characters. This preserves
+    # the credential on URL decoding without interpreting embedded URL escapes.
+    segment = quote(key, safe="")
+    if key.startswith("SCT") and len(key) > 3:
+        return "serverchan_turbo", "https://sctapi.ftqq.com/" + segment + ".send"
+    match = re.fullmatch(r"sctp([0-9]+)t(.+)", key)
     if match:
-        return "serverchan_sc3", f"https://{match[1]}.push.ft07.com/send/{key}.send"
+        return "serverchan_sc3", f"https://{match[1]}.push.ft07.com/send/{segment}.send"
     raise ValueError("SERVERCHAN_KEY_FORMAT_INVALID")
 
 

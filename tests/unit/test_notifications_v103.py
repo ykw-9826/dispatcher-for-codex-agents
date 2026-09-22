@@ -8,7 +8,7 @@ import shlex
 import sys
 import time
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
@@ -130,18 +130,117 @@ def test_serverchan_routes(key, protocol, endpoint, monkeypatch):
     "key",
     [
         "sctp",
-        "sctp0t" + "12345678",
+        "sctpttoken",
         "sctp123x12345678",
-        "sctp123tshort",
+        "sctp123t",
         "sctp123tabc/path",
         "sctp123t" + "ABC12345?secret",
-        "SCTshort",
+        "SCT",
         "unknown12345678",
         "sctp١٢٣tFAKE12345678",
     ],
 )
 def test_unknown_keys_rejected(key):
     with pytest.raises(ValueError, match="KEY_FORMAT"):
+        sinks.serverchan_endpoint(key)
+
+
+@pytest.mark.parametrize(
+    "prefix,protocol,host,path_prefix",
+    [
+        ("SCT", "serverchan_turbo", "sctapi.ftqq.com", "/"),
+        ("sctp123t", "serverchan_sc3", "123.push.ft07.com", "/send/"),
+    ],
+)
+@pytest.mark.parametrize(
+    "token",
+    [
+        "Plain123",
+        "a",
+        "safe_token-with-punctuation",
+        "x" * 1024,
+        "!$&'()*+,-.:;=@[]^_`{|}~%",
+        "%2F%3F%23%0D%0A",
+    ],
+)
+def test_serverchan_safe_tokens_preserve_identity(
+    prefix, protocol, host, path_prefix, token, monkeypatch
+):
+    key = prefix + token
+    sink = sinks.configured_sink(
+        {"sink_id": "synthetic", "kind": "serverchan", "enabled": True, "send_key": key}
+    )
+    actual_protocol, endpoint = sinks.serverchan_endpoint(key)
+    parsed = urlsplit(endpoint)
+    assert actual_protocol == sink.protocol == protocol
+    assert parsed.scheme == "https" and parsed.netloc == host
+    assert not parsed.query and not parsed.fragment and not parsed.username
+    assert parsed.path.startswith(path_prefix) and parsed.path.endswith(".send")
+    assert unquote(parsed.path[len(path_prefix) : -5]) == key
+    assert sink.send_key == key  # no trimming, case folding, or token rewriting
+    assert key not in repr(sink)
+    calls = []
+    monkeypatch.setattr(
+        sinks, "https_post", lambda *a: (calls.append(a) or (200, b'{"code":0}'))
+    )
+    result = sink.send(event())
+    assert calls[0][0] == endpoint
+    assert result["protocol"] == protocol and result["service_accepted"]
+    assert key not in json.dumps(result) and endpoint not in json.dumps(result)
+    assert sinks.protocol_metadata(sink) == {"protocol": protocol}
+
+
+@pytest.mark.parametrize("uid", ["0", "00123", "123", "123456789012345678901"])
+def test_serverchan_uid_is_ascii_digits_without_local_numeric_assumptions(uid):
+    protocol, endpoint = sinks.serverchan_endpoint("sctp" + uid + "t_")
+    assert protocol == "serverchan_sc3"
+    assert urlsplit(endpoint).netloc == uid + ".push.ft07.com"
+
+
+@pytest.mark.parametrize("prefix", ["SCT", "sctp123t"])
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        " ",
+        "\t",
+        "\r",
+        "\n",
+        "\x00",
+        "\x1f",
+        "\x7f",
+        "\x85",
+        "\u00a0",
+        "/",
+        "?",
+        "#",
+        "\\",
+    ],
+)
+def test_serverchan_unsafe_tokens_rejected_without_echo(prefix, unsafe):
+    key = prefix + "synthetic" + unsafe + "token"
+    with pytest.raises(ValueError) as failure:
+        sinks.serverchan_endpoint(key)
+    assert str(failure.value) == "SERVERCHAN_KEY_FORMAT_INVALID"
+    assert key not in str(failure.value)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "",
+        None,
+        123,
+        "sctToken",
+        "Sctp123tToken",
+        "sctp-1tToken",
+        "sctp123Token",
+        "sctp123TToken",
+        "sctp123",
+        "sctp١٢٣tToken",
+    ],
+)
+def test_serverchan_prefix_and_uid_fail_closed(key):
+    with pytest.raises(ValueError, match="^SERVERCHAN_KEY_FORMAT_INVALID$"):
         sinks.serverchan_endpoint(key)
 
 

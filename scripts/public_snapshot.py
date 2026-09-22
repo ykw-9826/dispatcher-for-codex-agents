@@ -81,7 +81,7 @@ def inspect_content(name: str, content: bytes) -> list[str]:
                 "src/dispatcher_for_codex_agents/notifications/sinks.py",
                 "scripts/public_snapshot.py",
             }
-            and url == "https://{match[1]}.push.ft07.com/send/{key}.send"
+            and url == "https://{match[1]}.push.ft07.com/send/{segment}.send"
         ):
             continue
         try:
