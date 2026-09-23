@@ -1,20 +1,27 @@
 {
   "version": 1,
+  "permission_notification_policy": "OFF",
   "ledger_directory": "/absolute/path/to/checkout/runtime/state/notifications",
   "sinks": [
     {
-      "sink_id": "serverchan",
+      "sink_id": "turbo_wechat",
       "kind": "serverchan",
       "enabled": false,
-      "send_key_env_file": "/absolute/external/private/serverchan.env"
+      "send_key_env_file": "/absolute/external/private/turbo.env"
     },
     {
-      "sink_id": "webhook",
-      "kind": "webhook",
+      "sink_id": "sc3_app",
+      "kind": "serverchan",
       "enabled": false,
-      "url": "",
-      "success_field": "ok",
-      "success_value": true
+      "send_key_env_file": "/absolute/external/private/sc3.env"
+    },
+    {
+      "sink_id": "dingtalk_group",
+      "kind": "dingtalk",
+      "enabled": false,
+      "webhook_env_file": "/absolute/external/private/dingtalk-webhook.env",
+      "signing": "HMAC_SHA256",
+      "signing_secret_env_file": "/absolute/external/private/dingtalk-signing.env"
     }
   ]
 }

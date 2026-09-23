@@ -43,7 +43,7 @@ def test_public_names_and_no_legacy_runtime_api(tmp_path):
     assert project["scripts"]["dca"] == (
         "dispatcher_for_codex_agents.agent_harness.cli:main"
     )
-    assert project["version"] == "1.0.2"
+    assert project["version"] == "1.0.3"
     source = tmp_path / "records.tsv"
     source.write_text("record_id\tvalue\nSYN-001\t7\n")
     task = AgentTask(
@@ -63,6 +63,8 @@ def test_public_names_and_no_legacy_runtime_api(tmp_path):
     for old in ("B2M_NOTIFY_", "b2m-notify", "B2M_REVIEWER_TASK", "ReviewerTask"):
         assert old not in payload
         for path in (ROOT / "src").rglob("*.py"):
+            if old == "b2m-notify" and path.name == "hooks.py":
+                continue  # Explicit legacy migration/detection, not a CLI alias.
             assert old not in path.read_text()
     assert "agent_executable" in JobSpec.model_fields
     assert "reviewer_executable" not in JobSpec.model_fields
@@ -70,7 +72,7 @@ def test_public_names_and_no_legacy_runtime_api(tmp_path):
 
 def test_installed_identity_without_old_public_aliases():
     distribution = importlib.metadata.distribution("dispatcher-for-codex-agents")
-    assert distribution.version == "1.0.2"
+    assert distribution.version == "1.0.3"
     assert {entry.name for entry in distribution.entry_points} == {"dca", "dca-notify"}
     assert build_parser().prog == "dca"
     assert "DCA — Dispatcher for Codex Agents" in build_parser().format_help()

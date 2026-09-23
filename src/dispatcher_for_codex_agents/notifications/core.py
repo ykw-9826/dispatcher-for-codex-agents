@@ -28,10 +28,11 @@ KINDS = frozenset(
         "human_action_required",
         "delivery_test",
         "event_acceptance_completed",
+        "permission_request_observed",
     }
 )
 STATUSES = frozenset(
-    {"STARTED", "COMPLETED", "FAILED", "INTERRUPTED", "REQUIRED", "TEST"}
+    {"STARTED", "COMPLETED", "FAILED", "INTERRUPTED", "REQUIRED", "TEST", "OBSERVED"}
 )
 METRICS = frozenset(
     {
@@ -83,6 +84,8 @@ class NotificationEvent:
             raise ValueError("INVALID_SOURCE")
         if self.kind not in KINDS or self.status not in STATUSES:
             raise ValueError("INVALID_EVENT_TYPE")
+        if self.kind == "permission_request_observed" and self.status != "OBSERVED":
+            raise ValueError("PERMISSION_OBSERVATION_ONLY")
         for name in CORRELATIONS:
             identifier(getattr(self, name))
         if not any(getattr(self, name) for name in CORRELATIONS):
@@ -149,7 +152,8 @@ def storage_path(path: str | Path) -> Path:
 
 
 def private_read(path: Path) -> bytes:
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    # Do not hang on a mistakenly configured FIFO before validating file type.
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as handle:
         info = os.fstat(handle.fileno())
         if (
@@ -169,30 +173,74 @@ def load_config(path: str | Path) -> dict[str, Any]:
     config = json.loads(private_read(resolved))
     if (
         not isinstance(config, dict)
-        or set(config) != {"version", "ledger_directory", "sinks"}
+        or not {"version", "ledger_directory", "sinks"} <= set(config)
+        or set(config)
+        - {"version", "ledger_directory", "sinks", "permission_notification_policy"}
+        or type(config["version"]) is not int
         or config["version"] != 1
     ):
         raise ValueError("CONFIG_SCHEMA_INVALID")
     directory = storage_path(config["ledger_directory"])
     if not directory.is_absolute() or directory == Path("/"):
         raise ValueError("LEDGER_PATH_INVALID")
-    if not isinstance(config["sinks"], list) or len(config["sinks"]) > 2:
-        raise ValueError("AT_MOST_TWO_SINKS")
-    from .sinks import configured_sink
+    from .sinks import MAX_SINKS
+
+    if not isinstance(config["sinks"], list) or len(config["sinks"]) > MAX_SINKS:
+        raise ValueError("AT_MOST_THREE_SINKS")
+    if config.get("permission_notification_policy", "OFF") not in (
+        "OFF",
+        "REQUEST_OBSERVED",
+    ):
+        raise ValueError("PERMISSION_NOTIFICATION_POLICY_INVALID")
 
     seen = set()
     for row in config["sinks"]:
-        if (
-            repository_root(resolved)
-            and isinstance(row, dict)
-            and (row.get("send_key") or row.get("url"))
-        ):
-            raise ValueError("INLINE_SECRET_MUST_BE_OUTSIDE_REPOSITORY")
-        configured_sink(row)
+        if not isinstance(row, dict) or not identifier(row.get("sink_id")):
+            raise ValueError("SINK_ID_REQUIRED")
         if row["sink_id"] in seen:
             raise ValueError("DUPLICATE_SINK_ID")
         seen.add(row["sink_id"])
     return config
+
+
+class LedgerIdentityError(ValueError):
+    """Safe diagnostic; never carry historical event content into an error."""
+
+
+def _validate_ledger_row(row: dict) -> None:
+    if not isinstance(row, dict):
+        raise ValueError("LEDGER_INTEGRITY_INVALID")
+    # Context, observed and permission_observation rows are not delivery keys.
+    # Even an incomplete delivery-shaped row must not bypass identity checks.
+    if not {"event_id", "sink_id", "delivery_status"}.intersection(row):
+        if "event" in row and not isinstance(row["event"], dict):
+            raise ValueError("LEDGER_INTEGRITY_INVALID")
+        return
+    try:
+        recorded = row["event_id"]
+        nested = row["event"]
+        if (
+            not isinstance(nested, dict)
+            or not isinstance(recorded, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", recorded)
+            or not identifier(row["sink_id"])
+            or not isinstance(row["delivery_status"], str)
+            or not row["delivery_status"]
+            or ("event_id" in nested and nested["event_id"] != recorded)
+        ):
+            raise ValueError
+        # Reuse NotificationEvent's existing canonicalization, not a second hash.
+        # Historical presentation flags, metrics and timestamps are not identity.
+        NotificationEvent(
+            source=nested["source"],
+            kind=nested["kind"],
+            status=nested["status"],
+            failure_code=nested.get("failure_code"),
+            **{name: nested.get(name) for name in CORRELATIONS},
+            event_id=recorded,
+        )
+    except (KeyError, TypeError, ValueError):
+        raise LedgerIdentityError("LEDGER_IDENTITY_CORRUPTION") from None
 
 
 @contextmanager
@@ -220,8 +268,12 @@ def ledger(directory: str | Path):
                     raise
                 time.sleep(0.005)
         rows = [json.loads(line) for line in handle if line.strip()]
+        # Validate the entire history before exposing any row to dedupe/reserve.
+        for row in rows:
+            _validate_ledger_row(row)
 
         def append(row):
+            _validate_ledger_row(row)
             handle.seek(0, os.SEEK_END)
             handle.write(json.dumps(row, sort_keys=True) + "\n")
             handle.flush()
@@ -235,7 +287,7 @@ def notify(
     event: NotificationEvent, config_path: str | Path, *, sender=None, clock=time.time
 ) -> dict[str, Any]:
     """Never raise or retry; a delivery error cannot alter any business result."""
-    from .sinks import bounded_send, configured_sink
+    from .sinks import bounded_send, configured_sink, protocol_metadata
 
     sender = sender or bounded_send
     try:
@@ -245,7 +297,7 @@ def notify(
             append({"observed": True, "event": event.payload(), "recorded_at": clock()})
         for settings in config["sinks"]:
             sink_id = settings["sink_id"]
-            if not settings["enabled"]:
+            if settings.get("enabled") is False:
                 continue
             should_send = False
             with ledger(config["ledger_directory"]) as (rows, append):
@@ -291,15 +343,56 @@ def notify(
                     if event.kind == "turn_completed" and candidates:
                         outcome = {"delivery_status": "HARNESS_TERMINAL_SUPPRESSED"}
                     else:
-                        # Crash/timeout before a confirmed response remains unknown.
-                        append({**row, "delivery_status": "DELIVERY_UNKNOWN"})
+                        # Reserve identity before local validation as well as send.
+                        # A crash here is explicitly not yet a network attempt.
+                        append(
+                            {
+                                **row,
+                                "delivery_status": "NOT_ATTEMPTED",
+                                "failure_code": "RESERVED",
+                                "attempted": False,
+                            }
+                        )
                         should_send = True
                 if not should_send:
                     append({**row, **outcome})
             if should_send:
-                # Network is outside the ledger lock: failure/human-action events
-                # remain independent while another event is being delivered.
-                outcome = sender(configured_sink(settings), event)
+                started = time.monotonic()
+                try:
+                    if repository_root(storage_path(config_path)) and (
+                        settings.get("send_key") or settings.get("url")
+                    ):
+                        raise ValueError("INLINE_SECRET_MUST_BE_OUTSIDE_REPOSITORY")
+                    sink = configured_sink(settings)
+                except (OSError, ValueError, TypeError, KeyError):
+                    outcome = {
+                        "delivery_status": "NOT_ATTEMPTED",
+                        "failure_code": "CONFIGURATION_ERROR",
+                        "attempted": False,
+                    }
+                else:
+                    protocol = protocol_metadata(sink)
+                    # Do not hold the ledger lock during transport. A crash after
+                    # reservation below remains ambiguous, never automatically retried.
+                    with ledger(config["ledger_directory"]) as (_, append):
+                        append(
+                            {
+                                **row,
+                                **protocol,
+                                "delivery_status": "DELIVERY_UNKNOWN",
+                                "attempted": True,
+                            }
+                        )
+                    try:
+                        outcome = {**sender(sink, event), "attempted": True}
+                    except Exception:
+                        outcome = {
+                            "delivery_status": "DELIVERY_UNKNOWN",
+                            "failure_code": "TRANSPORT_ERROR",
+                            "attempted": True,
+                        }
+                    outcome.update(protocol)
+                outcome["elapsed_seconds"] = round(time.monotonic() - started, 6)
                 with ledger(config["ledger_directory"]) as (_, append):
                     append({**row, **outcome, "recorded_at": clock()})
             results[sink_id] = outcome
@@ -310,6 +403,12 @@ def notify(
         }
     except FileNotFoundError:
         return {"status": "USER_CONFIGURATION_REQUIRED", "model_calls": 0}
+    except LedgerIdentityError:
+        return {
+            "status": "NOTIFICATION_NONBLOCKING_ERROR",
+            "failure_code": "LEDGER_IDENTITY_CORRUPTION",
+            "model_calls": 0,
+        }
     except Exception as exc:
         # Never stringify exceptions: URLs, keys and hook input can be embedded.
         return {

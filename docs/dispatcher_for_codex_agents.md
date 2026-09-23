@@ -4,7 +4,7 @@ DCA runs independent external model processes for a Codex/GPT controller. It doe
 not replace native same-provider child orchestration. The versioned
 [native capability matrix](native_capabilities.md) explains the current boundary.
 
-Technical baseline: development `dispatcher-for-codex-agents==1.0.2`, namespace
+Technical baseline: development `dispatcher-for-codex-agents==1.0.3`, namespace
 `dispatcher_for_codex_agents`, [contract v1](contract_v1.md). This tool is independent
 of any scientific project. This guide describes capability, not authorization
 to run a real task or alter a production installation.
@@ -175,7 +175,7 @@ different guarantees. Manual ambiguity review can be required.
 
 ## Notifications and safe integration / 通知与集成
 
-Default sinks are empty. ServerChan and HTTPS webhook are optional; the example
+Default sinks are empty. ServerChan (Turbo/SC3), DingTalk and HTTPS webhook are optional; the example
 notification config is an inactive template with placeholder paths. Keep any
 actual key-bearing config/secret outside the source repository and distributable,
 current-owner 0600. Do not commit real webhook targets. No sink is enabled or
@@ -197,6 +197,122 @@ The complete event stays local. Notification errors are non-blocking and do not
 change task/scientific state. Same-run harness terminal delivery suppresses an
 immediate main Stop duplicate; failure/action is not swallowed by success.
 Never reset/copy back/replay an older delivery ledger to “fix” a notification.
+
+### Notification configuration in 1.0.3 / 三通道与权限通知
+
+`configs/dca_notifications.example.json` contains three disabled targets. Keep
+the existing ledger path and Turbo `sink_id`; use a distinct stable ID for each
+additional destination. Maximum configured targets: three (including disabled
+entries). Do not reuse an ID for a different destination or replay an old event.
+Choose direct DingTalk **or** Turbo forwarding to that group, not both.
+
+- `kind=serverchan`: `send_key_env_file` points to an external 0600 file containing
+  one `SERVERCHAN_SENDKEY=...` assignment. `SCT...` selects Turbo;
+  `sctp<decimal-uid>t<token>` selects SC3. The endpoint is derived, never supplied
+  by a caller URL. Both require HTTP 2xx and integer `code=0`.
+- `kind=dingtalk`: `webhook_env_file` contains `DINGTALK_WEBHOOK_URL=...` for the
+  official robot endpoint. `signing=HMAC_SHA256` requires a separate
+  `signing_secret_env_file` containing `DINGTALK_SIGNING_SECRET=...`. Both files
+  must be outside repositories, canonical, current-owner 0600. `signing=NONE`
+  is explicit and omits the signing file; the operator must configure the robot's
+  supported keyword/IP security policy. The fixed body contains `DCA` if that is
+  the selected keyword. No outgoing bot, enterprise application or inbound server.
+- Existing `kind=webhook` retains its `{title, body}` wire contract and explicit
+  success-field/value configuration. It is not a DingTalk alias.
+
+Permission policy is `permission_notification_policy`: `OFF` (default, including
+old configs) or `REQUEST_OBSERVED`. OFF records a private observation only, without
+loading sink credentials or sending. REQUEST_OBSERVED uses `[DCA] 权限请求` and
+neutral text; it never claims a person is waiting, and never returns allow/deny.
+Only an allowlisted tool category is retained, not the command, description,
+transcript or tool arguments. A locally generated observation ID distinguishes
+requests; the host has not promised a stable request ID, so duplicate hook
+invocations are not claimed to be request-level exactly-once.
+
+Stop's title is `[DCA] Codex 本轮结束`: a main turn ended, not a claim of tests,
+scientific success or release completion. UserPromptSubmit remains local-only.
+No previous ledger event is relabeled. See [Codex hooks](https://learn.chatgpt.com/docs/hooks)
+and [approval security](https://learn.chatgpt.com/docs/agent-approvals-security): a raw
+PermissionRequest can precede automatic or other-hook approval.
+
+本版本默认关闭权限请求的外部通知，避免 Auto-review 时误报“需要人工操作”。
+选择 REQUEST_OBSERVED 也只表示观察到请求，不能证明最终审批 UI 或人工等待。
+本地 diagnostics 不保存命令/描述正文；不解析 transcript，不接管审批决策。
+三条发送路径为 SC3 App、钉钉直连、Turbo 微信；手机接收须逐设备另行人工验收。
+
+Fan-out stays synchronous and sequential. Turbo defaults to a 2s HTTPS socket
+timeout and 2.5s whole-send child deadline; SC3 uses 4s and 5s respectively.
+The socket timeout applies to connection/socket I/O waits, not the whole HTTP
+transaction or DNS resolution. The parent-owned child deadline bounds the send,
+including DNS/TLS/read waits. DingTalk and generic webhook retain 0.5s/0.9s.
+
+ServerChan rows optionally accept `transport_timeout_seconds` (0.1–5s) and
+`sink_deadline_seconds` (0.2–5s). Values must be finite JSON numbers, not booleans,
+strings or null; socket timeout must not exceed the effective child deadline.
+Omitted fields retain their protocol defaults. Invalid enabled-sink budgets fail
+locally without sending or preventing other valid sinks. No new field is required.
+
+Newly generated/migrated hook definitions use 17s: at most three 5s sends plus
+2s local overhead. The two-Turbo/one-SC3 default sum is 10s; the hook also covers
+three SC3 targets or maximum permitted overrides (15s). Responses return as soon
+as they arrive, not after the full deadline. Offline tests include config/ledger
+work; the overhead allowance is not an OS scheduling, large-ledger or delivery
+SLA. Timeout/transport ambiguity remains DELIVERY_UNKNOWN, without retry.
+No service, queue or worker is added. Existing installations/hooks do not
+auto-update; a later separately approved deployment must align hook budgets.
+
+保持同步、顺序发送。Turbo 默认 socket/整路预算为 2s/2.5s，SC3 为 4s/5s；
+覆盖字段仅用于 ServerChan，须满足有限范围及 socket 不超过整路预算。
+生成的 hook 上限为 17s，覆盖三路最大等待之和及 2s 本地余量；正常响应会立即返回。
+这些默认值为已观察到的约 0.6s Turbo、约 2.6s SC3 ACK 留出余量，不保证手机送达。
+本次源码修复不自动更新生产安装或 hooks，也不把历史超时改为成功。
+
+Each sink records independent `elapsed_seconds`, `attempted`, controlled failure
+code and available HTTP/business code. `SENT` means **service accepted**, not
+phone delivery. `NOT_ATTEMPTED/CONFIGURATION_ERROR` means local rejection;
+`DELIVERY_UNKNOWN` means an attempted/possibly dispatched send lacks confirmed
+acceptance. A reservation before dispatch is NOT_ATTEMPTED. Retrying the same
+event does not automatically retry any of these outcomes. No raw provider error
+body, signed URL, key or token is stored. Root schema/identity and ledger-integrity
+errors stop the whole operation; sink-local configuration/transport failures do
+not prevent other valid targets. Preserve the existing per-event/per-sink dedupe
+and ledger flock/append/fsync behavior.
+
+Delivery identities are checked across the entire ledger before processing begins:
+outer SHA256, nested ID when present, and the canonical hash of the nested identity
+must agree. Corruption stops all sends without modifying history. Context, event
+observations and permission observations without delivery keys remain non-dedupe
+records. Protocol labels are parent-owned once a sink is constructed, including
+connection failures, deadlines and abnormal child results; the initial pre-construction
+identity reservation has no protocol label. No credentials are added to these records.
+
+### Explicit hook migration / 显式迁移
+
+Do not put three-target config behind old handlers. Separately approve a new
+installed release and migrate UserPromptSubmit, Stop and PermissionRequest
+together before enabling the new config. This task does not activate production.
+
+`dca-notify hooks-migrate --codex-home <home> --config <existing-config>
+--executable <new-release/venv/bin/dca-notify> --from-executable <old-executable>`
+previews exact changes; repeat `--from-executable` for a mixed old/current setup.
+Apply only after review with `--apply --expected-sha256 <preview.previous_sha256>`.
+The old release launcher/metadata and the new 1.0.3 release identity are checked
+without executing them. Validation checks release paths, the release's own Python
+shebang, distribution/entry-point metadata and a console-wrapper AST allowlist.
+Supported uv suffix/slice and pip `re.sub` argv normalization may precede
+`sys.exit(main())` or `raise SystemExit(main())`, optionally under the main guard.
+Comments/strings cannot stand in for imports/calls; extra logic, imports or shadowed
+`main` are rejected before backup/apply. Only the three recognized, unfiltered, single-handler
+DCA groups are replaced; unrelated hooks survive. Unknown or duplicate DCA
+definitions fail closed. A hooks backup and hash-guarded rollback receipt are
+written; config, secret, delivery ledger, approval reviewer and trust are untouched.
+Review/trust the changed definitions manually in Codex. PermissionRequest can
+remain installed with OFF. Ordinary hooks-install still refuses legacy hooks;
+migration is never implicit. Existing legacy mutex names remain internal only.
+
+Protocol references: [ServerChan SDK](https://github.com/easychen/serverchan-sdk),
+[SC3 API](https://sc3.ft07.com/doc),
+[DingTalk security](https://open.dingtalk.com/document/robots/customize-robot-security-settings).
 
 ## Releases, rollback and publication / 安装回退及公开
 

@@ -8,8 +8,9 @@ from pathlib import Path
 import pytest
 
 from dispatcher_for_codex_agents.notifications.core import (
+    NotificationEvent,
     external_path,
-    load_config,
+    notify,
     storage_path,
 )
 from dispatcher_for_codex_agents.workspace_paths import output_path, workspace_root
@@ -59,13 +60,27 @@ def test_inline_credentials_rejected_in_repo(tmp_path, monkeypatch, field):
             {
                 "version": 1,
                 "ledger_directory": str(root / "runtime/state/test"),
-                "sinks": [{field: "FAKE_NOT_A_CREDENTIAL"}],
+                "sinks": [
+                    {
+                        "sink_id": "unsafe",
+                        "kind": "serverchan" if field == "send_key" else "webhook",
+                        "enabled": True,
+                        field: "FAKE_NOT_A_CREDENTIAL",
+                    }
+                ],
             }
         )
     )
     cfg.chmod(0o600)
-    with pytest.raises(ValueError, match="INLINE_SECRET"):
-        load_config(cfg)
+    result = notify(
+        NotificationEvent(
+            source="test", kind="delivery_test", status="TEST", run_id="test"
+        ),
+        cfg,
+        sender=lambda *_: pytest.fail("inline credential must never reach transport"),
+    )
+    assert result["sinks"]["unsafe"]["delivery_status"] == "NOT_ATTEMPTED"
+    assert result["sinks"]["unsafe"]["failure_code"] == "CONFIGURATION_ERROR"
 
 
 def test_installed_process_project_config_and_canonical_import():
