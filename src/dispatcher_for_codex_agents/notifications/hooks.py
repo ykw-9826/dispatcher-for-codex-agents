@@ -397,7 +397,7 @@ def migrate_hooks(
                         or handler["type"] != "command"
                         or handler["statusMessage"] not in (MARKER, RETIRED_MARKER)
                         or type(handler["timeout"]) is not int
-                        or handler["timeout"] not in (3, HOOK_TIMEOUT_SECONDS)
+                        or handler["timeout"] not in (3, 4, HOOK_TIMEOUT_SECONDS)
                     ):
                         raise ValueError("UNKNOWN_LEGACY_HOOK_STATE")
                     recognized.append(handler)

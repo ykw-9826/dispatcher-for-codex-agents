@@ -185,6 +185,13 @@ enabled sink configuration/secret errors become NOT_ATTEMPTED, while dispatched
 transport uncertainty remains DELIVERY_UNKNOWN. Each sink is isolated, with no
 automatic retry. SCT/SC3 use distinct fixed HTTPS endpoints; DingTalk is a separate
 one-way signed/explicit-unsigned protocol, not a GenericWebhook wire change.
+ServerChan rows may set `transport_timeout_seconds` (finite number, 0.1–5)
+and `sink_deadline_seconds` (finite number, 0.2–5); null/bool/string are invalid.
+Effective socket timeout must not exceed the whole-send deadline. Absent values
+use Turbo 2/2.5s or SC3 4/5s. Generated hooks allow 17s for three sequential sends
+at the maximum allowed deadline plus 2s local overhead; existing hooks need a
+separate explicit migration. Budgets do not enter event/sink dedupe identity,
+grant retries or change DELIVERY_UNKNOWN semantics.
 Every delivery-shaped ledger row must have a lowercase SHA256 outer `event_id`,
 matching nested `event_id` when present, and sufficient nested identity fields to
 recompute the same ID through `NotificationEvent`. The full ledger is checked

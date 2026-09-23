@@ -654,14 +654,25 @@ def migration_fixture(tmp_path):
     return home, cfg, target, (old, current), new
 
 
-def test_explicit_migration_backup_noop_rollback(tmp_path):
+@pytest.mark.parametrize("old_timeout", [3, 4])
+def test_explicit_migration_backup_noop_rollback(tmp_path, old_timeout):
     home, cfg, target, old, new = migration_fixture(tmp_path)
+    doc = json.loads(target.read_text())
+    for groups in doc["hooks"].values():
+        for group in groups:
+            for handler in group["hooks"]:
+                if "timeout" in handler:
+                    handler["timeout"] = old_timeout
+    target.write_text(json.dumps(doc))
     protected = [cfg, home / "config.toml", tmp_path / "ledger/delivery.jsonl"]
     before = [p.read_bytes() for p in protected]
     original = target.read_bytes()
     args = (str(home), new, str(cfg))
     preview = hooks.migrate_hooks(*args, from_executables=old)
     assert len(preview["changes"]) == 3 and target.read_bytes() == original
+    assert all(
+        c["after"]["timeout"] == sinks.HOOK_TIMEOUT_SECONDS for c in preview["changes"]
+    )
     with pytest.raises(ValueError, match="PREVIEW_HASH"):
         hooks.migrate_hooks(*args, from_executables=old, apply=True)
     result = hooks.migrate_hooks(
@@ -766,7 +777,8 @@ def test_migration_fail_closed(tmp_path, fault):
 def test_hook_budget_and_permission_invariant():
     assert sinks.MAX_SINKS == 3
     assert (
-        sinks.HOOK_TIMEOUT_SECONDS - sinks.MAX_SINKS * sinks.SINK_DEADLINE_SECONDS >= 1
+        sinks.HOOK_TIMEOUT_SECONDS - sinks.MAX_SINKS * sinks.MAX_SINK_DEADLINE_SECONDS
+        >= sinks.LOCAL_OVERHEAD_SECONDS
     )
     with pytest.raises(ValueError, match="OBSERVATION_ONLY"):
         core.NotificationEvent(

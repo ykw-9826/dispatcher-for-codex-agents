@@ -240,12 +240,32 @@ PermissionRequest can precede automatic or other-hook approval.
 本地 diagnostics 不保存命令/描述正文；不解析 transcript，不接管审批决策。
 三条发送路径为 SC3 App、钉钉直连、Turbo 微信；手机接收须逐设备另行人工验收。
 
-Fan-out stays sequential. Per sink: 0.5s HTTPS socket timeout, 0.9s child deadline;
-newly generated/migrated hook definitions use 4s (three deadlines plus 1.3s local
-overhead margin). Offline slow-fixture tests include configuration and ledger
-work. This is a tested local budget, not an OS scheduling, large-ledger or delivery
-SLA; historical production transport problems are not declared solved. No retry,
-service, queue, or persistent worker is added. Existing hooks do not auto-update.
+Fan-out stays synchronous and sequential. Turbo defaults to a 2s HTTPS socket
+timeout and 2.5s whole-send child deadline; SC3 uses 4s and 5s respectively.
+The socket timeout applies to connection/socket I/O waits, not the whole HTTP
+transaction or DNS resolution. The parent-owned child deadline bounds the send,
+including DNS/TLS/read waits. DingTalk and generic webhook retain 0.5s/0.9s.
+
+ServerChan rows optionally accept `transport_timeout_seconds` (0.1–5s) and
+`sink_deadline_seconds` (0.2–5s). Values must be finite JSON numbers, not booleans,
+strings or null; socket timeout must not exceed the effective child deadline.
+Omitted fields retain their protocol defaults. Invalid enabled-sink budgets fail
+locally without sending or preventing other valid sinks. No new field is required.
+
+Newly generated/migrated hook definitions use 17s: at most three 5s sends plus
+2s local overhead. The two-Turbo/one-SC3 default sum is 10s; the hook also covers
+three SC3 targets or maximum permitted overrides (15s). Responses return as soon
+as they arrive, not after the full deadline. Offline tests include config/ledger
+work; the overhead allowance is not an OS scheduling, large-ledger or delivery
+SLA. Timeout/transport ambiguity remains DELIVERY_UNKNOWN, without retry.
+No service, queue or worker is added. Existing installations/hooks do not
+auto-update; a later separately approved deployment must align hook budgets.
+
+保持同步、顺序发送。Turbo 默认 socket/整路预算为 2s/2.5s，SC3 为 4s/5s；
+覆盖字段仅用于 ServerChan，须满足有限范围及 socket 不超过整路预算。
+生成的 hook 上限为 17s，覆盖三路最大等待之和及 2s 本地余量；正常响应会立即返回。
+这些默认值为已观察到的约 0.6s Turbo、约 2.6s SC3 ACK 留出余量，不保证手机送达。
+本次源码修复不自动更新生产安装或 hooks，也不把历史超时改为成功。
 
 Each sink records independent `elapsed_seconds`, `attempted`, controlled failure
 code and available HTTP/business code. `SENT` means **service accepted**, not

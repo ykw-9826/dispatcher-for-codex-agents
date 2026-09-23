@@ -93,7 +93,7 @@ def test_fake_sinks_privacy_payload_and_application_ack(tmp_path, monkeypatch):
     path = config(tmp_path)
     calls = []
 
-    def post(url, body, content_type):
+    def post(url, body, content_type, timeout=None):
         calls.append((body, content_type))
         if content_type == "application/json":
             return 200, b'{"ok":true}'

@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import os
 import re
 import select
@@ -21,9 +22,41 @@ from urllib.parse import quote, urlencode, urlsplit
 SOCKET_TIMEOUT_SECONDS = 0.5
 SINK_DEADLINE_SECONDS = 0.9
 MAX_SINKS = 3
-# Three sequential deadlines (2.7s), plus 1.3s for local work/cleanup.
-# Offline slow-fixture tests exercise this budget; not a delivery SLA.
-HOOK_TIMEOUT_SECONDS = 4
+MAX_SINK_DEADLINE_SECONDS = 5.0
+LOCAL_OVERHEAD_SECONDS = 2
+# Covers any three allowed budgets, not just two Turbo targets plus one SC3.
+# Local overhead is a tested allowance, not an OS/large-ledger scheduling SLA.
+HOOK_TIMEOUT_SECONDS = math.ceil(
+    MAX_SINKS * MAX_SINK_DEADLINE_SECONDS + LOCAL_OVERHEAD_SECONDS
+)
+
+
+def _seconds(value, minimum: float, maximum: float) -> float:
+    if type(value) not in (int, float) or not minimum <= value <= maximum:
+        raise ValueError("TRANSPORT_BUDGET_INVALID")
+    return float(value)
+
+
+@dataclass(frozen=True)
+class TransportBudget:
+    socket_timeout: float
+    deadline: float
+
+    def __post_init__(self):
+        _seconds(self.socket_timeout, 0.1, MAX_SINK_DEADLINE_SECONDS)
+        _seconds(self.deadline, 0.2, MAX_SINK_DEADLINE_SECONDS)
+        if self.socket_timeout > self.deadline:
+            raise ValueError("TRANSPORT_BUDGET_INVALID")
+
+
+def serverchan_budget(protocol: str, overrides: dict) -> TransportBudget:
+    socket_timeout, deadline = (
+        (4.0, 5.0) if protocol == "serverchan_sc3" else (2.0, 2.5)
+    )
+    return TransportBudget(
+        overrides.get("transport_timeout_seconds", socket_timeout),
+        overrides.get("sink_deadline_seconds", deadline),
+    )
 
 
 def serverchan_endpoint(key: str) -> tuple[str, str]:
@@ -74,7 +107,13 @@ class NotificationSink(Protocol):
     def send(self, event) -> dict: ...
 
 
-def https_post(url: str, body: bytes, content_type: str) -> tuple[int, bytes]:
+def https_post(
+    url: str,
+    body: bytes,
+    content_type: str,
+    timeout: float = SOCKET_TIMEOUT_SECONDS,
+) -> tuple[int, bytes]:
+    timeout = _seconds(timeout, 0.1, MAX_SINK_DEADLINE_SECONDS)
     parts = urlsplit(url)
     if (
         parts.scheme != "https"
@@ -87,7 +126,7 @@ def https_post(url: str, body: bytes, content_type: str) -> tuple[int, bytes]:
     connection = http.client.HTTPSConnection(
         parts.hostname,
         parts.port,
-        timeout=SOCKET_TIMEOUT_SECONDS,
+        timeout=timeout,
         context=ssl.create_default_context(),
     )
     try:
@@ -106,10 +145,15 @@ class ServerChanSink:
     sink_id: str
     send_key: str = field(repr=False)
     protocol: str = field(init=False)
+    budget: TransportBudget | None = None
 
     def __post_init__(self):
         protocol, _ = serverchan_endpoint(self.send_key)
         object.__setattr__(self, "protocol", protocol)
+        if self.budget is None:
+            object.__setattr__(self, "budget", serverchan_budget(protocol, {}))
+        elif not isinstance(self.budget, TransportBudget):
+            raise ValueError("TRANSPORT_BUDGET_INVALID")
 
     def send(self, event) -> dict:
         from .presentation import present
@@ -126,6 +170,7 @@ class ServerChanSink:
             endpoint,
             body,
             "application/x-www-form-urlencoded",
+            self.budget.socket_timeout,
         )
         return {
             **validate_response(status, content, "code", 0),
@@ -231,18 +276,21 @@ def configured_sink(row: dict) -> NotificationSink:
         raise ValueError("SINK_ID_REQUIRED")
     common = {"sink_id", "kind", "enabled"}
     if row.get("kind") == "serverchan":
-        if set(row) == common | {"send_key_env_file"}:
+        budget_fields = {"transport_timeout_seconds", "sink_deadline_seconds"}
+        fields = set(row) - budget_fields
+        if fields == common | {"send_key_env_file"}:
             # Read the existing credential, never source/eval shell text or
             # include secret values in diagnostics.
             send_key = secret_value(row["send_key_env_file"], "SERVERCHAN_SENDKEY")
-        elif set(row) == common | {"send_key"}:
+        elif fields == common | {"send_key"}:
             send_key = row["send_key"]
         else:
             raise ValueError("SINK_CONFIG_INVALID")
         if not isinstance(send_key, str):
             raise ValueError("SERVERCHAN_KEY_FORMAT_INVALID")
-        serverchan_endpoint(send_key)
-        return ServerChanSink(row["sink_id"], send_key)
+        protocol, _ = serverchan_endpoint(send_key)
+        budget = serverchan_budget(protocol, row)
+        return ServerChanSink(row["sink_id"], send_key, budget)
     if row.get("kind") == "dingtalk":
         fields = common | {"webhook_env_file", "signing"}
         signing = row.get("signing")
@@ -306,9 +354,18 @@ def protocol_metadata(sink: NotificationSink) -> dict[str, str]:
 
 
 def bounded_send(
-    sink: NotificationSink, event, *, timeout: float = SINK_DEADLINE_SECONDS
+    sink: NotificationSink, event, *, timeout: float | None = None
 ) -> dict:
     """One short-lived child bounds DNS/TLS/read time; no daemon or retry queue."""
+    if timeout is None:
+        budget = getattr(sink, "budget", None)
+        timeout = (
+            budget.deadline
+            if isinstance(budget, TransportBudget)
+            else SINK_DEADLINE_SECONDS
+        )
+    # Explicit shorter timeouts remain available to offline tests/library callers.
+    timeout = _seconds(timeout, 0.001, MAX_SINK_DEADLINE_SECONDS)
     protocol = protocol_metadata(sink)
     read_fd, write_fd = os.pipe()
     pid = os.fork()
