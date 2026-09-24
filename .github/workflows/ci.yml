@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-validation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      UV_CACHE_DIR: ${{ github.workspace }}/runtime/cache/uv
+      UV_PYTHON_INSTALL_DIR: ${{ github.workspace }}/runtime/toolchain/python
+      UV_PYTHON_DOWNLOADS: never
+      UV_NO_ENV_FILE: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Initialize private test workspace
+        run: python3 scripts/init-workspace.py
+      - uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc # v6.4.3
+        with:
+          version: '0.12.10'
+          enable-cache: false
+      - name: Install pinned Python without home-bin links
+        run: scripts/dca-env.sh env UV_PYTHON_DOWNLOADS=automatic uv python install --no-bin "$(cat .python-version)"
+      - name: Install frozen dependencies
+        run: scripts/dca-env.sh uv sync --frozen
+      - name: Ruff
+        run: scripts/dca-env.sh .venv/bin/ruff check .
+      - name: Black
+        run: scripts/dca-env.sh .venv/bin/black --check .
+      - name: Public source and secret scan
+        run: scripts/dca-env.sh .venv/bin/python scripts/public_snapshot.py --output exports/ci-scan.zip
+      - name: Full offline tests
+        run: scripts/dca-env.sh .venv/bin/python -m pytest
+      - name: Build and fresh-wheel acceptance
+        run: scripts/dca-env.sh .venv/bin/python scripts/validate_release.py --output exports/ci-candidate
+      - name: Confirm tracked inputs unchanged
+        run: git diff --exit-code
