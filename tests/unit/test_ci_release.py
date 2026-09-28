@@ -19,9 +19,9 @@ def helper(monkeypatch):
     return importlib.import_module("validate_release")
 
 
-@pytest.mark.parametrize("tag", [None, "v1.0.3"])
+@pytest.mark.parametrize("tag", [None, "v1.0.4"])
 def test_version_and_tag(helper, tag):
-    assert helper.project_version(ROOT, tag) == "1.0.3"
+    assert helper.project_version(ROOT, tag) == "1.0.4"
 
 
 @pytest.mark.parametrize("tag", ["", "v9.9.9", "v1.0.3; exit 0", "$(id)", "--help"])

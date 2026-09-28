@@ -1,6 +1,6 @@
 # CLI/API contract v1
 
-Distribution: `dispatcher-for-codex-agents`, version `1.0.3` (development).
+Distribution: `dispatcher-for-codex-agents`, version `1.0.4` (development).
 Python namespace: `dispatcher_for_codex_agents`.
 Entry points: `dca`, `dca-notify`.
 Execution API: `dispatcher_for_codex_agents.agent_harness`.
@@ -32,7 +32,9 @@ no capabilities. `batch plan --runtime-contract FILE` freezes the same policy in
 every task. `revalidate` writes independent hash-pinned derivatives; collection
 uses `batch collect --selection FILE`, never automatic failure promotion. See the
 [1.0.2 runtime contract](runtime_contract_v1.0.2.md) for exact byte rules, supported
-event evidence, synthetic-only limits and immutable revalidation examples.
+event evidence, synthetic-only limits and immutable revalidation examples. The
+[1.0.4 supplement](runtime_contract_v1.0.4.md) defines the current activity-v3
+pre-turn diagnostic exception; the versioned 1.0.2 document remains unchanged.
 
 `invoke` and `batch run` select a sidecar profile. `--runtime-home`/`--executable`
 and the existing `--codex-home`/`--codex-executable` aliases select the standalone

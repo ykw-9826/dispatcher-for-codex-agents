@@ -264,7 +264,10 @@ def test_out_of_turn_rejection_derivative_never_collected(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("out_of_order", [False, True])
-def test_legacy_eight_file_layout_not_rewritten(tmp_path, monkeypatch, out_of_order):
+@pytest.mark.parametrize("preturn", [False, True])
+def test_legacy_eight_file_layout_not_rewritten(
+    tmp_path, monkeypatch, out_of_order, preturn
+):
     import csv
 
     from dispatcher_for_codex_agents.agent_harness.contracts import (
@@ -296,6 +299,23 @@ def test_legacy_eight_file_layout_not_rewritten(tmp_path, monkeypatch, out_of_or
         lines = events.splitlines(keepends=True)
         # Synthetic refusal is now outside the turn; hash-valid is not order-valid.
         lines[1], lines[2] = lines[2], lines[1]
+        events = b"".join(lines)
+    if preturn:
+        lines = events.splitlines(keepends=True)
+        lines.insert(
+            1,
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "notice",
+                        "type": "error",
+                        "message": "synthetic notice",
+                    },
+                }
+            ).encode()
+            + b"\n",
+        )
         events = b"".join(lines)
     writer.write(
         task=task,
@@ -330,6 +350,11 @@ def test_legacy_eight_file_layout_not_rewritten(tmp_path, monkeypatch, out_of_or
     assert hashes(writer.path) == before
     verified = verify_revalidation(report["directory"], expected_source=writer.path)
     assert verified["status"] == report["status"]
+    audit = verified["runtime_interpretation"]["tool_activity"]
+    assert audit["classifier_version"] == "dca-activity/3"
+    assert audit["applied_rule_ids"] == (
+        ["ALLOW_PRETURN_COMPLETED_ERROR_ITEM"] if preturn else []
+    )
     if out_of_order:
         evaluation = json.loads(
             (Path(report["directory"]) / "evaluation.json").read_bytes()
