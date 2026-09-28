@@ -695,3 +695,292 @@ def test_valid_item_lifecycle_and_intermediate_messages_preserved():
     assert evidence["lifecycle"]["status"] == "PASS"
     assert evidence["classifications"] == ["TOOL_ATTEMPT_REJECTED"]
     assert evidence["confirmed_user_input_rejection_events"]
+
+
+def diagnostic(identity="diagnostic", message="Synthetic diagnostic — no subtype"):
+    return {
+        "type": "item.completed",
+        "item": {"id": identity, "type": "error", "message": message},
+    }
+
+
+def preturn(*items, text='{"decision":"TYPE_A","reason":"done"}'):
+    ordered = stream(text=text)
+    return (ordered[0], *items, *ordered[1:])
+
+
+def evaluate_preturn(tmp_path, events, *, stderr="", exit_code=0, optin=True):
+    from test_agent_harness import _profile, _task
+
+    from dispatcher_for_codex_agents.agent_harness.adapter import evaluate_capture
+
+    policy = (
+        RuntimeContract(
+            structured_output="json_or_single_fence",
+            rejected_user_input="warn_if_runtime_rejected",
+        )
+        if optin
+        else RuntimeContract()
+    )
+    return evaluate_capture(
+        task=_task(tmp_path / "not-read.tsv", runtime_contract=policy),
+        profile=_profile(),
+        stdout="\n".join(json.dumps(e) for e in events).encode(),
+        stderr=stderr,
+        cli_version="codex-cli 0.153.4",
+        exit_code=exit_code,
+        provenance={"agent_process_started": True, "configured_model": "fake-model"},
+    )
+
+
+@pytest.mark.parametrize("count", [0, 1, 3])
+@pytest.mark.parametrize("version", ["codex-cli 0.153.4", "codex-cli 0.155.1"])
+def test_preturn_completed_error_is_audited_without_message_heuristics(count, version):
+    from dispatcher_for_codex_agents.agent_harness.runtime_contract import (
+        CLASSIFIER_VERSION,
+        PRETURN_DIAGNOSTIC_RULE,
+    )
+
+    events = preturn(*(diagnostic(str(i), str(i)) for i in range(count)))
+    raw = json.dumps(events).encode()
+    result = classify_activity(events, version=version, complete=True)
+    assert json.dumps(events).encode() == raw
+    assert result["classifier_version"] == CLASSIFIER_VERSION == "dca-activity/3"
+    assert result["lifecycle"] == {"status": "PASS", "issues": []}
+    assert result["classifications"] == ["NO_TOOL_ACTIVITY"]
+    assert result["calls"] == result["confirmed_user_input_rejection_events"] == []
+    assert result["applied_rule_ids"] == ([PRETURN_DIAGNOSTIC_RULE] if count else [])
+    assert result["diagnostics"] == [
+        {
+            "classification": "PRETURN_NON_FATAL_DIAGNOSTIC",
+            "rule_id": PRETURN_DIAGNOSTIC_RULE,
+            "artifact": "events.jsonl",
+            "event_index": i + 1,
+            "pointer": "/item",
+            "item_id": str(i),
+        }
+        for i in range(count)
+    ]
+
+
+@pytest.mark.parametrize("optin", [False, True])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "agent_message",
+        "reasoning",
+        "command_execution",
+        "file_change",
+        "mcp_tool_call",
+        "collab_tool_call",
+        "web_search",
+        "todo_list",
+        "unknown",
+    ],
+)
+def test_other_preturn_completed_items_remain_hard_failure(tmp_path, kind, optin):
+    item = diagnostic()
+    item["item"]["type"] = kind
+    result, _ = evaluate_preturn(tmp_path, preturn(item), optin=optin)
+    evidence = result.provenance["runtime_interpretation"]["tool_activity"]
+    assert result.failure_code == "EVENT_STREAM_INVALID"
+    assert evidence["lifecycle"]["issues"] == ["events[1]:item_outside_turn"]
+    assert not evidence["diagnostics"]
+    assert not evidence["confirmed_user_input_rejection_events"]
+
+
+@pytest.mark.parametrize("event_type", ["item.started", "item.updated"])
+@pytest.mark.parametrize("item_type", ["error", "command_execution"])
+def test_no_started_or_updated_preturn_exception(tmp_path, event_type, item_type):
+    item = diagnostic()
+    item["type"], item["item"]["type"] = event_type, item_type
+    result, _ = evaluate_preturn(tmp_path, preturn(item))
+    evidence = result.provenance["runtime_interpretation"]["tool_activity"]
+    assert result.failure_code == "EVENT_STREAM_INVALID"
+    assert "events[1]:item_outside_turn" in evidence["lifecycle"]["issues"]
+    assert not evidence["diagnostics"]
+
+
+@pytest.mark.parametrize("message", [None, 1, [], {}])
+def test_malformed_diagnostic_message_fails_closed(tmp_path, message):
+    result, _ = evaluate_preturn(tmp_path, preturn(diagnostic(message=message)))
+    assert result.failure_code == "EVENT_STREAM_INVALID"
+
+
+def test_diagnostic_identity_and_position_remain_strict(tmp_path):
+    normal = stream(text='{"decision":"TYPE_A","reason":"done"}')
+    invalid = [
+        (diagnostic(), *normal),
+        (*normal, diagnostic()),
+        preturn(diagnostic(), diagnostic()),
+        preturn(diagnostic(identity="final")),
+        preturn(diagnostic(identity="")),
+        preturn({"type": "unknown.event"}),
+    ]
+    for events in invalid:
+        result, _ = evaluate_preturn(tmp_path, events)
+        assert result.failure_code == "EVENT_STREAM_INVALID"
+    unknown = classify_activity(
+        preturn(diagnostic()), version="codex-cli 9.9.9", complete=True
+    )
+    assert unknown["classifications"] == ["UNKNOWN_OR_INCOMPLETE"]
+    assert not unknown["applied_rule_ids"]
+
+
+@pytest.mark.parametrize("optin", [False, True])
+def test_diagnostic_does_not_override_fatal_or_other_acceptance_gates(tmp_path, optin):
+    events = preturn(diagnostic())
+    # A top-level fatal is not an allowed diagnostic, even with a contradictory
+    # successful terminal, or when it is the final captured event.
+    for fatal in (
+        (*events[:2], {"type": "error", "message": "synthetic fatal"}),
+        (*events[:2], {"type": "error", "message": "synthetic fatal"}, *events[2:]),
+        (*events[:-1], {"type": "turn.failed", "error": {"message": "failed"}}),
+        events[:-1],
+    ):
+        result, _ = evaluate_preturn(tmp_path, fatal, optin=optin)
+        assert result.status == "failure"
+        evidence = result.provenance["runtime_interpretation"]["tool_activity"]
+        assert "UNKNOWN_OR_INCOMPLETE" in evidence["classifications"]
+        assert not evidence["confirmed_user_input_rejection_events"]
+    assert (
+        evaluate_preturn(tmp_path, events, exit_code=1, optin=optin)[0].status
+        == "failure"
+    )
+    assert (
+        evaluate_preturn(tmp_path, preturn(diagnostic(), text="{}"), optin=optin)[
+            0
+        ].failure_code
+        == "OUTPUT_SCHEMA_INVALID"
+    )
+
+
+def test_preturn_normalization_and_evidence_bytes_are_preserved(tmp_path):
+    raw_final = b'```json\n{"decision":"TYPE_A","reason":"done"}\n```'
+    events = preturn(diagnostic(), text=raw_final.decode())
+    before = json.dumps(events)
+    result, artifacts = evaluate_preturn(tmp_path, events)
+    assert result.status == "success"
+    assert json.dumps(events) == before
+    assert artifacts["raw_final_output.bin"] == raw_final
+    audit = json.loads(artifacts["interpretation.json"])
+    assert (
+        audit["captured_events_sha256"]
+        == hashlib.sha256("\n".join(json.dumps(e) for e in events).encode()).hexdigest()
+    )
+    assert audit["normalization"]["action"] == "single_json_fence"
+    assert audit["tool_activity"]["diagnostics"][0]["event_index"] == 1
+
+
+def test_in_turn_error_behavior_unchanged_and_stderr_not_confirmed_rejection(tmp_path):
+    before = activity(diagnostic(), version="codex-cli 0.153.4")
+    assert before["lifecycle"]["status"] == "PASS"
+    assert before["classifications"] == ["UNKNOWN_OR_INCOMPLETE"]
+    assert not before["diagnostics"]
+    events = preturn(diagnostic())
+    result, _ = evaluate_preturn(
+        tmp_path, events, stderr="request_user_input is unavailable in Default mode"
+    )
+    evidence = result.provenance["runtime_interpretation"]["tool_activity"]
+    assert result.failure_code == "POLICY_VIOLATION"
+    assert result.schema_validation_status == "PASS"
+    assert evidence["lifecycle"]["status"] == "PASS"
+    assert evidence["classifications"] == ["UNKNOWN_OR_INCOMPLETE"]
+    assert evidence["confirmed_user_input_rejection_events"] == []
+    assert evidence["calls"] == []
+    assert "uncorrelated_stderr_tool_signal" in evidence["issues"]
+    ordinary, _ = evaluate_preturn(tmp_path, events, stderr="synthetic cache notice")
+    assert ordinary.status == "success"
+
+
+@pytest.mark.parametrize(
+    "kind", ["command_execution", "mcp_tool_call", "collab_tool_call"]
+)
+def test_diagnostic_does_not_reclassify_executed_tool_failures(kind):
+    item = {
+        "type": "item.completed",
+        "item": {
+            "id": "call",
+            "type": kind,
+            "status": "failed",
+            "exit_code": 1,
+        },
+    }
+    events = stream(item)
+    normal = classify_activity(events, version="codex-cli 0.153.4", complete=True)
+    with_diagnostic = classify_activity(
+        (events[0], diagnostic(), *events[1:]),
+        version="codex-cli 0.153.4",
+        complete=True,
+    )
+    assert (
+        normal["classifications"]
+        == with_diagnostic["classifications"]
+        == ["TOOL_EXECUTED"]
+    )
+    assert normal["calls"][0]["outcome"] == with_diagnostic["calls"][0]["outcome"]
+
+
+@pytest.mark.parametrize("thread_id", [None, "", 0, False, [], {}])
+def test_preturn_window_requires_valid_thread_identity(tmp_path, thread_id):
+    events = preturn(diagnostic())
+    events[0]["thread_id"] = thread_id
+    for missing in (False, True):
+        if missing:
+            events[0].pop("thread_id", None)
+        result, _ = evaluate_preturn(tmp_path, events)
+        audit = result.provenance["runtime_interpretation"]["tool_activity"]
+        assert result.failure_code == "EVENT_STREAM_INVALID"
+        assert "events[0]:invalid_thread_identity" in audit["lifecycle"]["issues"]
+        assert audit["diagnostics"] == audit["applied_rule_ids"] == []
+
+
+@pytest.mark.parametrize("version", ["codex-cli 0.153.4", "codex-cli 0.155.1"])
+def test_preturn_window_never_reopens_after_fatal_or_turn_terminal(tmp_path, version):
+    ordered = stream(text='{"decision":"TYPE_A","reason":"done"}')
+    starts = (
+        (*ordered[:1], {"type": "error", "message": "warning-looking text"}),
+        (*ordered[:2], {"type": "error", "message": "synthetic fatal"}),
+        (*ordered[:2], {"type": "turn.failed", "error": {"message": "failed"}}),
+        ordered,
+    )
+    for prefix in starts:
+        for reopen in ((), ({"type": "turn.started"},)):
+            events = (*prefix, *reopen, diagnostic(), *ordered[-2:])
+            audit = classify_activity(events, version=version, complete=True)
+            assert audit["lifecycle"]["status"] == "UNKNOWN_OR_INCOMPLETE"
+            assert audit["diagnostics"] == audit["applied_rule_ids"] == []
+            assert audit["confirmed_user_input_rejection_events"] == []
+            assert evaluate_preturn(tmp_path, events)[0].status == "failure"
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        None,
+        [],
+        "error",
+        {},
+        {"type": "error", "message": "synthetic"},
+        {"type": "error", "id": "notice"},
+        {"type": "error", "id": 1, "message": "synthetic"},
+    ],
+)
+def test_preturn_malformed_item_cannot_use_diagnostic_rule(tmp_path, malformed):
+    result, _ = evaluate_preturn(
+        tmp_path, preturn({"type": "item.completed", "item": malformed})
+    )
+    audit = result.provenance["runtime_interpretation"]["tool_activity"]
+    assert result.failure_code == "EVENT_STREAM_INVALID"
+    assert audit["diagnostics"] == audit["applied_rule_ids"] == []
+
+
+@pytest.mark.parametrize("optin", [False, True])
+def test_no_tools_required_preserves_acceptance_policy(tmp_path, optin):
+    for events in (preturn(), preturn(diagnostic())):
+        result, _ = evaluate_preturn(tmp_path, events, optin=optin)
+        audit = result.provenance["runtime_interpretation"]["tool_activity"]
+        assert result.status == "success"
+        assert result.schema_validation_status == "PASS"
+        assert audit["classifications"] == ["NO_TOOL_ACTIVITY"]
+        assert audit["calls"] == audit["confirmed_user_input_rejection_events"] == []

@@ -249,4 +249,4 @@ def test_approved_mit_license_and_package_metadata():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert project["license"] == "MIT"
     assert project["license-files"] == ["LICENSE"]
-    assert project["version"] == "1.0.3"
+    assert project["version"] == "1.0.4"

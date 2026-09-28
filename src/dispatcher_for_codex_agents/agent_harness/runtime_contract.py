@@ -18,7 +18,8 @@ from .contracts import RuntimeContract
 from .schema import OutputSchemaError, validate_json_schema
 
 NORMALIZER_VERSION = "dca-output/1"
-CLASSIFIER_VERSION = "dca-activity/2"
+CLASSIFIER_VERSION = "dca-activity/3"
+PRETURN_DIAGNOSTIC_RULE = "ALLOW_PRETURN_COMPLETED_ERROR_ITEM"
 VALIDATOR_VERSION = "dca-schema/1"
 SYNTHETIC_PROTOCOL = "dca.synthetic-runtime/1"
 JSON_WHITESPACE = b" \t\r\n"
@@ -155,13 +156,16 @@ def protocol_for_version(version: str) -> str:
     return "codex-exec/" + match[1] if match else "UNSUPPORTED"
 
 
-def _lifecycle_issues(events: tuple[dict, ...]) -> list[str]:
+def _lifecycle_issues(
+    events: tuple[dict, ...], *, allow_preturn_diagnostics: bool
+) -> tuple[list[str], list[int]]:
     """Validate one exec turn; completed-only items are part of CLI JSONL.
 
     Agent messages may be intermediate responses. Only the final selected message
     must precede the terminal event; do not invent an App Server phase field.
     """
     issues: list[str] = []
+    diagnostics: list[int] = []
     phase = "before_thread"
     items: dict[str, tuple[str, str]] = {}
     for index, event in enumerate(events):
@@ -170,6 +174,8 @@ def _lifecycle_issues(events: tuple[dict, ...]) -> list[str]:
         if kind == "thread.started":
             if phase != "before_thread" or index != 0:
                 problem = "thread_start_out_of_order"
+            elif not isinstance(event.get("thread_id"), str) or not event["thread_id"]:
+                problem = "invalid_thread_identity"
             else:
                 phase = "before_turn"
         elif kind == "turn.started":
@@ -182,9 +188,17 @@ def _lifecycle_issues(events: tuple[dict, ...]) -> list[str]:
                 problem = "terminal_out_of_order"
             phase = "terminal"
         elif kind in ("item.started", "item.updated", "item.completed"):
-            if phase != "in_turn":
-                problem = "item_outside_turn"
             item = event.get("item")
+            diagnostic = (
+                allow_preturn_diagnostics
+                and phase == "before_turn"
+                and kind == "item.completed"
+                and isinstance(item, dict)
+                and item.get("type") == "error"
+                and isinstance(item.get("message"), str)
+            )
+            if phase != "in_turn" and not diagnostic:
+                problem = "item_outside_turn"
             if (
                 not isinstance(item, dict)
                 or not isinstance(item.get("id"), str)
@@ -203,15 +217,24 @@ def _lifecycle_issues(events: tuple[dict, ...]) -> list[str]:
                 if kind == "item.updated" and previous is None:
                     problem = problem or "item_update_without_start"
                 items[item["id"]] = (item["type"], kind)
+            if diagnostic and problem is None:
+                diagnostics.append(index)
+        elif kind == "error":
+            # An unrecoverable stream error is never an item diagnostic, even if
+            # a contradictory successful terminal is subsequently captured.
+            problem = "stream_error"
+            phase = "stream_failed"
         elif phase == "terminal":
             problem = "event_after_terminal"
+        elif phase != "in_turn":
+            problem = "unknown_event_outside_turn"
         if problem:
             issues.append(f"events[{index}]:{problem}")
     if phase != "terminal":
         issues.append("missing_thread_turn_terminal")
     if any(state != "item.completed" for _, state in items.values()):
         issues.append("unfinished_item_lifecycle")
-    return issues
+    return issues, diagnostics
 
 
 def classify_activity(
@@ -225,7 +248,9 @@ def classify_activity(
     supported = protocol != "UNSUPPORTED"
     if not supported or not complete:
         issues.append("unsupported_protocol_or_incomplete_stream")
-    lifecycle_issues = _lifecycle_issues(events)
+    lifecycle_issues, diagnostics = _lifecycle_issues(
+        events, allow_preturn_diagnostics=supported
+    )
     issues.extend(lifecycle_issues)
     benign = {"agent_message", "reasoning", "todo_list"}
     tools = {
@@ -248,6 +273,10 @@ def classify_activity(
     exempt_events: list[int] = []
     work_state: dict[str, list] = {}
     for index, event in enumerate(events):
+        if index in diagnostics:
+            # The exact raw item remains in events.jsonl. No message heuristics,
+            # inferred warning subtype or tool/rejection evidence is introduced.
+            continue
         event_type = event.get("type")
         if not isinstance(event_type, str):
             issues.append(f"events[{index}]:invalid_event_type")
@@ -414,6 +443,18 @@ def classify_activity(
         "classifier_version": CLASSIFIER_VERSION,
         "protocol": protocol,
         "synthetic": synthetic,
+        "applied_rule_ids": [PRETURN_DIAGNOSTIC_RULE] if diagnostics else [],
+        "diagnostics": [
+            {
+                "classification": "PRETURN_NON_FATAL_DIAGNOSTIC",
+                "rule_id": PRETURN_DIAGNOSTIC_RULE,
+                "artifact": "events.jsonl",
+                "event_index": index,
+                "pointer": "/item",
+                "item_id": events[index]["item"]["id"],
+            }
+            for index in diagnostics
+        ],
         "lifecycle": {
             "status": "PASS" if supported and not lifecycle_issues else UNKNOWN,
             "issues": lifecycle_issues,
