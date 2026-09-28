@@ -12,6 +12,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 ROOT_FILES = {
+    ".github/workflows/ci.yml",
+    ".github/workflows/release-validation.yml",
     ".gitignore",
     ".python-version",
     "AGENTS.md",

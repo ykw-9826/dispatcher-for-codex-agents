@@ -1,4 +1,6 @@
 .gitignore
+.github/workflows/ci.yml
+.github/workflows/release-validation.yml
 .python-version
 ABOUT.md
 LICENSE
@@ -32,6 +34,8 @@ scripts/build-release.sh
 scripts/dca-env.sh
 scripts/init-workspace.py
 scripts/public_snapshot.py
+scripts/validate_release.py
+scripts/installed_release_smoke.py
 src/dispatcher_for_codex_agents/__init__.py
 src/dispatcher_for_codex_agents/workspace_paths.py
 src/dispatcher_for_codex_agents/main_agent_bridge/__init__.py
@@ -77,6 +81,7 @@ tests/unit/test_notifications_v103.py
 tests/unit/test_public_preparation.py
 tests/unit/test_v1_interface.py
 tests/unit/test_release_candidate.py
+tests/unit/test_ci_release.py
 tests/unit/test_agent_harness.py
 tests/unit/test_agent_capabilities.py
 tests/unit/test_codex_runtime_grant.py

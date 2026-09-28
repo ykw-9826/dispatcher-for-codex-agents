@@ -56,10 +56,57 @@ is referenced by links, not vendored documentation/source.
 
 The fake demo and full tests must pass from an initialized clean snapshot using
 only tracked/whitelisted inputs. No existing installation, private config, secret,
-real model or phone request may be required. The public candidate has no hosted
-CI workflow or badge. Local fake/offline results do not certify a live runtime or
+real model or phone request may be required. CI uses the same offline checks
+described below. Local or hosted offline results do not certify a live runtime or
 every operating system. Further publication requires explicit user approval.
 
 fake demo 和全量测试必须在初始化后的干净快照内通过，只用白名单输入，不依赖已有
-安装、私有配置、密钥、真实模型或手机请求。本候选没有托管 CI workflow/徽章。
+安装、私有配置、密钥、真实模型或手机请求。CI 使用下列同一组离线检查。
 本地 fake/offline 结果不证明 live runtime 或所有 OS 已验收；后续发布须另行批准。
+
+## CI and candidate validation / CI 与候选包验收
+
+`ci.yml` checks pull requests and pushes to main on Ubuntu 24.04 with Python
+3.11.15, matching the current Python 3.11-only contract. It runs Ruff, Black,
+the public-source scanner, full offline pytest, then builds and checks a fresh
+wheel. Dependencies come from `uv sync --frozen`; the lockfile is not updated.
+
+`release-validation.yml` supports manual dispatch and `v*` tag pushes. A tag
+must equal `v` plus the package version. It builds wheel/sdist from the scanned
+source snapshot, checks metadata and module bytes, generates SHA256SUMS, and
+installs the wheel non-editably into a new disposable venv. The offline smoke
+checks CLI versions/help, import origin, notification config, Turbo/SC3 protocol
+construction, PermissionRequest default OFF and hook migration parser preview.
+The parser uses synthetic host/release identities; it does not certify a production
+launcher or host trust. No production secret, notification or model is accessed.
+
+Both workflows use SHA-pinned actions, read-only repository permission and no
+repository secrets. PRs do not run via `pull_request_target`. Checkout credentials
+are not persisted and shared action caches are disabled. Dependency/Python setup
+may access their public registries; runtime tests and notification checks are
+offline. Candidate archives are retained as Actions artifacts for seven days.
+Validation never creates a Release/tag, publishes to PyPI, merges or deploys.
+
+From an initialized checkout with the pinned Python and uv available:
+
+```bash
+scripts/dca-env.sh uv sync --frozen
+scripts/dca-env.sh .venv/bin/ruff check .
+scripts/dca-env.sh .venv/bin/black --check .
+scripts/dca-env.sh .venv/bin/python scripts/public_snapshot.py --output exports/ci-scan.zip
+scripts/dca-env.sh .venv/bin/python -m pytest
+scripts/dca-env.sh .venv/bin/python scripts/validate_release.py --output exports/candidate
+```
+
+Use new output names on subsequent runs; existing candidates are never overwritten.
+For a tag check, append `--tag v1.0.3` (or the candidate's actual version).
+With a populated cache, set `UV_OFFLINE=1`. The helper retains detailed logs under
+`runtime/tmp/release-validation-*`; only the three candidate archives and
+SHA256SUMS are uploaded, not logs or environments. `scripts/build-release.sh`
+remains the separate, explicitly authorized production-install workflow.
+
+PR/main 检查包含格式、公开内容扫描、全量离线测试和 fresh-wheel 安装验收。
+release-validation 可手动运行或由版本 tag 触发；tag 必须匹配包版本。
+它只生成可供人工下载的候选资产，不自动发布、合并或切生产。
+上述命令同样可在本地执行；有缓存时设置 UV_OFFLINE=1。网络仅用于准备工具和
+依赖，通知检查使用合成输入，不发送真实消息。每次使用新的输出目录，保留失败日志。
