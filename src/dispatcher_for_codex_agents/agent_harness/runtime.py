@@ -11,8 +11,25 @@ from typing import Any, Protocol, runtime_checkable
 from .contracts import AgentTask, InvocationResult, ModelProfile
 from .payload import PayloadBuilder
 
+ANTIGRAVITY_LIVE_GATE = "ANTIGRAVITY_LIVE_NOT_ADMITTED"
 DEFAULT_ADAPTER_ID = "codex_cli"
-RESERVED_ADAPTER_IDS = frozenset({"zcode_agent", "deepseek_harness", "deepcode_cli"})
+
+
+def reject_unadmitted_selection(*values: str) -> None:
+    """Declared runtime/profile/provider aliases cannot select an unadmitted route."""
+    if any(
+        value.casefold().replace("-", "_") in {"agy", "antigravity", "antigravity_cli"}
+        for value in values
+    ):
+        raise ValueError(
+            ANTIGRAVITY_LIVE_GATE + " (NOT_IMPLEMENTED): "
+            "reserved runtime; state/auth/permission/retry gates pending"
+        )
+
+
+RESERVED_ADAPTER_IDS = frozenset(
+    {"zcode_agent", "deepseek_harness", "deepcode_cli", "antigravity_cli"}
+)
 
 
 @dataclass(frozen=True)
@@ -55,11 +72,13 @@ class AdapterRegistry:
     def register(
         self, adapter_id: str, factory: Callable[[AdapterSettings], InvocationAdapter]
     ) -> None:
+        reject_unadmitted_selection(adapter_id)
         if adapter_id in self._factories or adapter_id in RESERVED_ADAPTER_IDS:
             raise ValueError(f"adapter is already registered or reserved: {adapter_id}")
         self._factories[adapter_id] = factory
 
     def require(self, adapter_id: str) -> None:
+        reject_unadmitted_selection(adapter_id)
         if adapter_id not in self._factories:
             raise ValueError(f"unsupported adapter_id (NOT_IMPLEMENTED): {adapter_id}")
 

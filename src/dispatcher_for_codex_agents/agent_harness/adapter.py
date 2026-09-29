@@ -55,12 +55,15 @@ from dispatcher_for_codex_agents.agent_harness.shard import ImmutableShardWriter
 from dispatcher_for_codex_agents.workspace_paths import temporary_root
 
 from .process_guard import record_invocation_process
+from .runtime import reject_unadmitted_selection
 from .runtime_contract import (
     UNKNOWN,
     canonical_bytes,
     classify_activity,
     digest,
+    exec_wire_issues,
     normalize_output,
+    protocol_for_version,
     validate_coverage,
 )
 
@@ -312,6 +315,14 @@ def evaluate_capture(
         parsed = replace(
             parsed, valid_jsonl=False, parse_error="invalid thread/turn/item lifecycle"
         )
+    if activity["protocol"] == "UNSUPPORTED" or exec_wire_issues(
+        parsed.events, version=cli_version
+    ):
+        parsed = replace(
+            parsed,
+            valid_jsonl=False,
+            parse_error="unsupported version or invalid exec wire",
+        )
     exemptions = set(activity["confirmed_user_input_rejection_events"])
     warnings = _warning_lines(stderr)
     if contract.rejected_user_input == "warn_if_runtime_rejected" and exemptions:
@@ -508,9 +519,33 @@ class CodexCliAdapter:
         self._runtime_scope: SelectedRuntimeProtectionScope | None = None
         self._runtime_protection: dict | None = None
         self._cancellation = cancellation or Event()
+        self._guard_executable_selection()
+
+    def _guard_executable_selection(self) -> None:
+        """Reject declared AGY paths/wrappers before even a local version probe.
+
+        Explicit custom executable code remains caller-trusted, not a sandbox.
+        This does not authenticate arbitrary renamed programs.
+        """
+        for part in self._executable:
+            if not isinstance(part, str) or not part or "\0" in part:
+                raise ValueError("Invalid executable selection")
+            name = Path(part).name
+            reject_unadmitted_selection(name, Path(name).stem)
+        selected = shutil.which(
+            self._executable[0], path=self._environment_overrides.get("PATH")
+        )
+        if selected:
+            try:
+                target = Path(selected).resolve(strict=True)
+            except (OSError, RuntimeError):
+                raise ValueError("Selected executable identity unresolved") from None
+            reject_unadmitted_selection(target.name, target.stem)
 
     def preflight(self, *, task: AgentTask, profile: ModelProfile) -> dict[str, Any]:
         RuntimeContract.model_validate(task.runtime_contract)
+        self._guard_executable_selection()
+        reject_unadmitted_selection(profile.adapter_id, profile.profile_id)
         self._runtime_protection = None
         if profile.adapter_id != self.adapter_id:
             raise ValueError("Profile adapter mismatch")
@@ -530,6 +565,7 @@ class CodexCliAdapter:
         # Normalize profile read/decode errors before capability compilation or
         # a local version probe, including for dry-run's pre-reservation path.
         resolved = self._resolver.resolve(profile.profile_id)
+        reject_unadmitted_selection(resolved.configured_provider)
         command, compiled = self._build_command(
             profile=profile,
             isolated_working_directory=Path(temporary_root())
@@ -571,6 +607,7 @@ class CodexCliAdapter:
         return environment
 
     def _read_cli_version(self, environment: dict[str, str]) -> str:
+        self._guard_executable_selection()
         if self._cli_version is not None:
             return self._cli_version
         try:
@@ -593,7 +630,9 @@ class CodexCliAdapter:
                 timeout=10,
             )
             version = (completed.stdout or completed.stderr).strip()
-            self._cli_version = version if version else "NOT_REPORTED"
+            self._cli_version = (
+                version if completed.returncode == 0 and version else "NOT_REPORTED"
+            )
         except (OSError, subprocess.SubprocessError):
             self._cli_version = "NOT_REPORTED"
         return self._cli_version
@@ -674,6 +713,8 @@ class CodexCliAdapter:
         capability_policy: CapabilityPolicy | None = None,
     ) -> tuple[tuple[str, ...], dict]:
         """Build the only permitted fresh, ephemeral `codex exec` command."""
+        self._guard_executable_selection()
+        reject_unadmitted_selection(profile.adapter_id, profile.profile_id)
         self._runtime_protection = None
         policy = capability_policy or CapabilityPolicy()
         # model_copy()/model_construct() must not bypass the authority validator.
@@ -734,6 +775,14 @@ class CodexCliAdapter:
         ]
         if policy.restricted:
             command.extend(["--sandbox", "read-only"])
+        # Fixed-version additions: never infer support in future CLI releases.
+        if self._cli_version in {"codex-cli 0.158.0", "fake-codex 0.158.0"}:
+            for feature in (
+                "daemon_auto_start",
+                "agent_message_board",
+                "send_message_to_user_async",
+            ):
+                command.extend(["--disable", feature])
         # Independent host features must not hitchhike on a command/web/MCP grant.
         for feature in (
             "multi_agent_v2",
@@ -961,11 +1010,21 @@ class CodexCliAdapter:
                 detail="Runtime contract validation failed",
             )
         environment = self._environment()
-        cli_version = (
-            self._read_cli_version(environment)
-            if task.capability_policy.restricted
-            else "NOT_PROBED"
-        )
+        cli_version = self._cli_version or "NOT_PROBED"
+        try:
+            self._guard_executable_selection()
+            reject_unadmitted_selection(profile.adapter_id, profile.profile_id)
+        except ValueError as exc:
+            return self._write_prelaunch_failure(
+                writer=writer,
+                task=task,
+                profile=profile,
+                payload=None,
+                resolved=None,
+                cli_version=cli_version,
+                failure_code=FailureCode.PROFILE_CONFIGURATION_INVALID,
+                detail=str(exc),
+            )
         if self._cancellation.is_set():
             return self._write_prelaunch_failure(
                 writer=writer,
@@ -1035,6 +1094,22 @@ class CodexCliAdapter:
             )
 
         try:
+            reject_unadmitted_selection(resolved.configured_provider)
+        except ValueError as exc:
+            return self._write_prelaunch_failure(
+                writer=writer,
+                task=task,
+                profile=profile,
+                payload=payload,
+                resolved=resolved,
+                cli_version=cli_version,
+                failure_code=FailureCode.PROFILE_CONFIGURATION_INVALID,
+                detail=str(exc),
+            )
+        if task.capability_policy.restricted:
+            cli_version = self._read_cli_version(environment)
+
+        try:
             validate_paths(
                 task.capability_policy,
                 protected=(self._resolver.codex_home, Path(workers_root)),
@@ -1057,6 +1132,18 @@ class CodexCliAdapter:
                 cli_version=cli_version,
                 failure_code=FailureCode.POLICY_VIOLATION,
                 detail=str(exc),
+            )
+
+        if protocol_for_version(cli_version) == "UNSUPPORTED":
+            return self._write_prelaunch_failure(
+                writer=writer,
+                task=task,
+                profile=profile,
+                payload=payload,
+                resolved=resolved,
+                cli_version=cli_version,
+                failure_code=FailureCode.PROFILE_CONFIGURATION_INVALID,
+                detail="CODEX_EXEC_VERSION_NOT_ADMITTED",
             )
 
         call_key = (task.task_id, profile.profile_id)

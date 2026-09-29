@@ -1,7 +1,7 @@
 """Versioned, pure output interpretation and observable tool-activity evidence.
 
 No runtime operations, credentials, permissions or model calls belong here.
-CLI mappings follow OpenAI exec_events.rs at rust-v0.153.4/rust-v0.155.1.
+CLI mappings follow OpenAI exec_events.rs at rust-v0.153.4/rust-v0.155.1/rust-v0.158.0.
 The separately named synthetic protocol is test evidence, not a Codex protocol.
 """
 
@@ -152,8 +152,31 @@ def protocol_for_version(version: str) -> str:
         return "UNSUPPORTED"
     if version == SYNTHETIC_PROTOCOL:
         return version
-    match = re.fullmatch(r"(?:codex-cli|fake-codex) (0\.153\.4|0\.155\.1)", version)
+    match = re.fullmatch(
+        r"(?:codex-cli|fake-codex) (0\.153\.4|0\.155\.1|0\.158\.0)", version
+    )
     return "codex-exec/" + match[1] if match else "UNSUPPORTED"
+
+
+def exec_wire_issues(events: tuple[dict, ...], *, version: str) -> list[str]:
+    """Only the new 0.158.0 Option<Vec<JsonValue>> field is typed here."""
+    if protocol_for_version(version) != "codex-exec/0.158.0":
+        return []
+    issues = []
+    for index, event in enumerate(events):
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "web_search":
+            continue
+        results = item.get("results")
+        invalid = results is not None and not isinstance(results, list)
+        if isinstance(results, list):
+            try:
+                json.dumps(results, allow_nan=False)
+            except (ValueError, TypeError):
+                invalid = True
+        if invalid:
+            issues.append(f"events[{index}]:invalid_web_search_results")
+    return issues
 
 
 def _lifecycle_issues(
@@ -252,6 +275,7 @@ def classify_activity(
         events, allow_preturn_diagnostics=supported
     )
     issues.extend(lifecycle_issues)
+    issues.extend(exec_wire_issues(events, version=version))
     benign = {"agent_message", "reasoning", "todo_list"}
     tools = {
         "command_execution",
