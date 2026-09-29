@@ -1,4 +1,4 @@
-"""Offline Antigravity 1.2.12 protocol subset; never launches an executable.
+"""Offline Antigravity 1.2.12/1.2.13 protocol subset; never launches an executable.
 
 Synthetic conformance is not authentication, permission or live-host admission.
 The production registry deliberately refuses this runtime.
@@ -16,8 +16,11 @@ from typing import Any
 from .contracts import AgentTask, CapabilityPolicy, FailureCode, InvocationResult
 from .runtime_contract import normalize_output, validate_coverage
 
-AGY_VERSION = "1.2.12"
+AGY_VERSION = "1.2.12"  # Historical capture/fixture default, not live authority.
+AGY_LIVE_TARGET_VERSION = "1.2.13"
+AGY_CAPTURE_VERSIONS = (AGY_VERSION, AGY_LIVE_TARGET_VERSION)
 AGY_PROTOCOL = "dca-agy-headless/1"
+ADMISSION_CONTRACT = "dca-agy-text-only/2"
 LIVE_GATE = "ANTIGRAVITY_LIVE_NOT_ADMITTED"
 
 
@@ -39,12 +42,12 @@ def compile_headless(
     *,
     task: AgentTask,
     executable: str,
-    model: str,
+    model: str | None,
     prompt: str,
     version: str = AGY_VERSION,
 ) -> HeadlessPlan:
     task = _task(task)
-    if version != AGY_VERSION:
+    if version not in AGY_CAPTURE_VERSIONS:
         raise ValueError("ANTIGRAVITY_VERSION_UNSUPPORTED")
     policy = task.capability_policy
     if not policy.restricted:
@@ -53,12 +56,13 @@ def compile_headless(
         not isinstance(executable, str)
         or not PurePosixPath(executable).is_absolute()
         or ".." in PurePosixPath(executable).parts
-        or not isinstance(model, str)
-        or not model
-        or model.startswith("-")
+        or (
+            model is not None
+            and (not isinstance(model, str) or not model or model.startswith("-"))
+        )
         or not isinstance(prompt, str)
         or not prompt
-        or any("\0" in v for v in (executable, model, prompt))
+        or any("\0" in v for v in (executable, model or "", prompt))
         or not math.isfinite(task.timeout)
         or task.timeout < 0.001
     ):
@@ -75,13 +79,31 @@ def compile_headless(
             json.dumps(task.expected_output_schema, allow_nan=False),
             "--print-timeout",
             format(task.timeout, ".9f").rstrip("0").rstrip(".") + "s",
-            "--model=" + model,
+            *(("--model=" + model,) if model is not None else ()),
             "--disable-slash-commands",
             "--print=" + prompt,
         ),
         policy_hash,
         task.timeout,
     )
+
+
+def validate_schema_argument(argv: list[str], schema: dict) -> None:
+    """Guard the generated schema argument before any live process can start."""
+    try:
+        positions = [
+            i
+            for i, arg in enumerate(argv)
+            if arg == "--json-schema" or arg.startswith("--json-schema=")
+        ]
+        if len(positions) != 1:
+            raise ValueError("schema flag count")
+        i = positions[0]
+        raw = argv[i + 1] if argv[i] == "--json-schema" else argv[i].split("=", 1)[1]
+        if _canonical(_json(raw)) != _canonical(schema):
+            raise ValueError("schema flag mismatch")
+    except (ValueError, IndexError, TypeError, RecursionError, OverflowError):
+        raise ValueError("ANTIGRAVITY_SCHEMA_ARGUMENT_INVALID") from None
 
 
 class _Invalid(ValueError):
@@ -140,6 +162,7 @@ def _usage(value: Any) -> dict[str, int]:
 
 def _parse(raw: bytes) -> dict:
     conversation = None
+    init = None
     terminal = None
     steps: dict[int, tuple[str, str]] = {}
     for line in raw.decode("utf-8").split("\n"):
@@ -159,13 +182,28 @@ def _parse(raw: bytes) -> dict:
             body = event.get("init")
             _require(isinstance(identity, str) and bool(identity), "IDENTITY_INVALID")
             _require(isinstance(body, dict), "INIT_INVALID")
-            _require(set(body) <= {"cwd", "tools", "permission_mode"}, "INIT_FIELDS")
+            _require(
+                set(body)
+                <= {"cwd", "tools", "permission_mode", "model", "agent", "json_schema"},
+                "INIT_FIELDS",
+            )
+            for key in ("model", "agent"):
+                _require(key not in body or isinstance(body[key], str), "INIT_FIELDS")
+            _require(
+                "json_schema" not in body or isinstance(body["json_schema"], dict),
+                "INIT_FIELDS",
+            )
             _require(
                 isinstance(body.get("cwd"), str)
                 and isinstance(body.get("permission_mode"), str),
                 "INIT_INVALID",
             )
-            _require(body.get("tools") == [], "TOOLS_NOT_ADMITTED")
+            _require(
+                isinstance(body.get("tools"), list)
+                and all(isinstance(name, str) and name for name in body["tools"]),
+                "ADVERTISED_TOOL_INVENTORY_INVALID",
+            )
+            init = body
             conversation = identity
             continue
         _require(conversation is not None, "INIT_MISSING")
@@ -175,6 +213,16 @@ def _parse(raw: bytes) -> dict:
         _require(isinstance(body, dict), "EVENT_BODY_INVALID")
         _require(body.get("conversation_id") == conversation, "IDENTITY_CONFLICT")
         if kind == "step_update":
+            # Typed activity, not init inventory or prose, determines admission.
+            _require(
+                "subagent_info" not in body and body.get("step_type") != "subagent",
+                "TEXT_ONLY_SUBAGENT_ACTIVITY",
+            )
+            _require(
+                not ({"tool_info", "tool_name"} & set(body))
+                and body.get("step_type") != "tool",
+                "TEXT_ONLY_TOOL_ACTIVITY",
+            )
             _require(
                 set(body)
                 <= {
@@ -184,6 +232,7 @@ def _parse(raw: bytes) -> dict:
                     "step_type",
                     "text_delta",
                     "usage",
+                    "duration_seconds",
                 },
                 "STEP_FIELDS_OR_TOOL_NOT_ADMITTED",
             )
@@ -206,6 +255,14 @@ def _parse(raw: bytes) -> dict:
                 _require(isinstance(body["text_delta"], str), "STEP_TEXT_INVALID")
             if "usage" in body:
                 _usage(body["usage"])  # Validate, never sum into final usage.
+            if "duration_seconds" in body:
+                duration = body["duration_seconds"]
+                _require(
+                    type(duration) in (int, float)
+                    and math.isfinite(duration)
+                    and duration >= 0,
+                    "STEP_DURATION_INVALID",
+                )
             previous = steps.get(index)
             _require(
                 previous is None
@@ -225,9 +282,16 @@ def _parse(raw: bytes) -> dict:
                     "usage",
                     "structured_output",
                     "json_schema",
+                    "denied_actions",
                 },
                 "RESULT_FIELDS",
             )
+            _require(
+                "denied_actions" not in body
+                or isinstance(body["denied_actions"], list),
+                "DENIED_ACTIONS_INVALID",
+            )
+            _require(not body.get("denied_actions"), "TEXT_ONLY_DENIED_ACTIONS")
             status = body.get("status")
             _require(
                 isinstance(status, str)
@@ -244,8 +308,8 @@ def _parse(raw: bytes) -> dict:
                 "RESULT_STATUS_INVALID",
             )
             _require(
-                type(body.get("num_turns")) is int and body["num_turns"] == 1,
-                "ONE_FRESH_TURN_REQUIRED",
+                type(body.get("num_turns")) is int and body["num_turns"] >= 0,
+                "NUM_TURNS_INVALID",
             )
             duration = body.get("duration_seconds")
             _require(
@@ -262,7 +326,7 @@ def _parse(raw: bytes) -> dict:
             )
             terminal = body
     _require(terminal is not None, "FINAL_RESULT_MISSING")
-    return terminal
+    return {**terminal, "_init": init, "_steps": steps}
 
 
 def evaluate_headless_capture(
@@ -284,6 +348,7 @@ def evaluate_headless_capture(
     provenance = {
         "adapter_id": "antigravity_cli",
         "runtime_protocol": AGY_PROTOCOL,
+        "admission_contract": ADMISSION_CONTRACT,
         "runtime_version": version,
         "evidence_scope": "OFFLINE_DOCUMENTED_SUBSET",
         "live_execution_gate": LIVE_GATE,
@@ -326,57 +391,90 @@ def evaluate_headless_capture(
     completed = False
     usage: dict[str, int] = {}
     try:
-        _require(version == AGY_VERSION, "VERSION_UNSUPPORTED")
+        _require(version in AGY_CAPTURE_VERSIONS, "VERSION_UNSUPPORTED")
         _require(
             task.capability_policy == CapabilityPolicy(),
             "CAPABILITY_MAPPING_UNSUPPORTED",
         )
         terminal = _parse(stdout)
-        provenance["stream_validation"] = "PASS"
+        init = terminal.pop("_init")
+        steps = terminal.pop("_steps")
+        input_indices = [i for i, (kind, _) in steps.items() if kind == "user_input"]
+        provenance["observed_init"] = init
+        provenance["advertised_tool_inventory"] = init["tools"]
+        provenance["tool_inventory_semantics"] = "ADVERTISED_TOOL_INVENTORY"
+        provenance["observed_tool_steps"] = 0
+        provenance["observed_subagent_steps"] = 0
         provenance["terminal_status"] = terminal["status"]
+        provenance["result_num_turns"] = terminal["num_turns"]
+        provenance["user_input_step_count"] = len(input_indices)
+        provenance["single_input_rule"] = (
+            f"AGY_{version.replace('.', '_')}_ONE_INPUT_AND_NUM_TURNS_ONE"
+        )
         provenance["conversation_identity_sha256"] = hashlib.sha256(
             terminal["conversation_id"].encode()
         ).hexdigest()
-        usage = terminal.get("usage", {})
-        provenance["usage_status"] = (
-            "REPORTED"
-            if {"input_tokens", "output_tokens"} <= set(usage)
-            else "PARTIAL" if usage else "UNKNOWN"
+        # Schema echo is an independent requirement, not a claim about the
+        # actual output. A CLI advertising a schema can still violate it.
+        _require("json_schema" in init, "AGY_SCHEMA_NOT_EFFECTIVE")
+        _require(
+            _canonical(init["json_schema"]) == _canonical(task.expected_output_schema),
+            "INIT_SCHEMA_CONFLICT",
         )
-        completed = terminal["status"] == "SUCCESS"
-        if not completed:
+        if terminal["status"] != "SUCCESS":
             failure = (
                 FailureCode.CANCELLED
                 if terminal["status"] in {"CANCELED", "INTERRUPTED"}
                 else FailureCode.TURN_COMPLETED_MISSING
             )
         else:
+            _require(
+                "structured_output" in terminal,
+                "AGY_STRUCTURED_OUTPUT_CONTRACT_VIOLATION",
+            )
+            _require(
+                "json_schema" in terminal
+                and _canonical(terminal["json_schema"])
+                == _canonical(task.expected_output_schema),
+                "TERMINAL_SCHEMA_CONFLICT",
+            )
+            _require(len(input_indices) == 1, "ONE_STRUCTURED_INPUT_REQUIRED")
+            _require(
+                input_indices[0] == next(iter(steps)),
+                "INPUT_MUST_PRECEDE_RESPONSE",
+            )
+            # No one-input telemetry mismatch is established for either version.
+            # Do not relax this check using synthetic evidence alone.
+            _require(terminal["num_turns"] == 1, "ONE_FRESH_TURN_REQUIRED")
+            value = terminal["structured_output"]
             normalized = normalize_output(
-                terminal["response"].encode(),
+                _canonical(value).encode("utf-8"),
                 task.expected_output_schema,
                 task.runtime_contract,
             )
             provenance["output_interpretation"] = normalized.audit
+            provenance["structured_output_source"] = "TERMINAL_RESULT_FIELD"
             schema_status = normalized.schema_status
             if schema_status != "PASS":
                 failure = FailureCode.OUTPUT_SCHEMA_INVALID
             else:
-                # Strict JSON and type-sensitive equality: True must not equal 1.
-                value = _json(normalized.validator_bytes.decode("utf-8"))
+                # response is a consistency check only; it never supplies a
+                # missing structured_output and is never fence-recovered here.
                 _require(
-                    "structured_output" not in terminal
-                    or _canonical(terminal["structured_output"]) == _canonical(value),
-                    "STRUCTURED_OUTPUT_CONFLICT",
-                )
-                _require(
-                    "json_schema" not in terminal
-                    or _canonical(terminal["json_schema"])
-                    == _canonical(task.expected_output_schema),
-                    "SCHEMA_CONFLICT",
+                    _canonical(_json(terminal["response"])) == _canonical(value),
+                    "RESPONSE_STRUCTURED_OUTPUT_CONFLICT",
                 )
                 provenance["coverage_status"] = validate_coverage(
                     value, task.expected_output_schema
                 )
+                provenance["stream_validation"] = "PASS"
+                completed = True
+        usage = terminal.get("usage", {})
+        provenance["usage_status"] = (
+            "REPORTED"
+            if {"input_tokens", "output_tokens"} <= set(usage)
+            else "PARTIAL" if usage else "UNKNOWN"
+        )
     except (_Invalid, ValueError, TypeError, RecursionError, OverflowError) as exc:
         # Fixed categories only: never persist parser text or runtime output.
         warnings.append(str(exc) if isinstance(exc, _Invalid) else "CAPTURE_INVALID")

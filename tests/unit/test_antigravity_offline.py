@@ -15,6 +15,7 @@ from dispatcher_for_codex_agents.agent_harness.antigravity import (
     LIVE_GATE,
     compile_headless,
     evaluate_headless_capture,
+    validate_schema_argument,
 )
 from dispatcher_for_codex_agents.agent_harness.contracts import CapabilityPolicy
 from dispatcher_for_codex_agents.agent_harness.runtime import (
@@ -26,6 +27,7 @@ FIXTURE = Path(__file__).parents[1] / "fixtures" / "fake_agy_cli.py"
 
 
 def events():
+    schema = _task(Path("/synthetic/not-read")).expected_output_schema
     return [
         {
             "event": "init",
@@ -34,6 +36,7 @@ def events():
                 "cwd": "/synthetic",
                 "tools": [],
                 "permission_mode": "request-review",
+                "json_schema": schema,
             },
         },
         {
@@ -41,9 +44,18 @@ def events():
             "step_update": {
                 "conversation_id": "synthetic",
                 "step_index": 0,
-                "step_type": "agent_response",
+                "step_type": "user_input",
                 "state": "DONE",
                 "usage": {"input_tokens": 900, "output_tokens": 900},
+            },
+        },
+        {
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "synthetic",
+                "step_index": 1,
+                "step_type": "agent_response",
+                "state": "DONE",
             },
         },
         {
@@ -54,6 +66,8 @@ def events():
                 "response": '{"decision":"TYPE_A","reason":"done"}',
                 "duration_seconds": 0.1,
                 "num_turns": 1,
+                "json_schema": schema,
+                "structured_output": {"decision": "TYPE_A", "reason": "done"},
                 "usage": {
                     "input_tokens": 10,
                     "output_tokens": 5,
@@ -131,7 +145,7 @@ def test_no_production_adapter_even_if_fake_protocol_passes(tmp_path):
         AdapterRegistry().register("antigravity_cli", lambda _: None)
 
 
-@pytest.mark.parametrize("version", ["1.2.11", "1.2.13", "UNKNOWN"])
+@pytest.mark.parametrize("version", ["1.2.11", "1.2.14", "1.2.13-rc.1", "UNKNOWN"])
 def test_version_fail_closed(tmp_path, version):
     assert capture(tmp_path, version=version).status == "failure"
     with pytest.raises(ValueError, match="VERSION_UNSUPPORTED"):
@@ -171,7 +185,6 @@ def test_non_success_statuses(tmp_path, status):
         "duplicate_init",
         "tool",
         "tool_metadata",
-        "tool_inventory",
         "bad_schema",
         "structured_conflict",
         "schema_conflict",
@@ -219,8 +232,6 @@ def test_adversarial_failures(tmp_path, mutation):
         step["step_type"] = "tool"
     elif mutation == "tool_metadata":
         step["tool_info"] = {"status": "rejected"}
-    elif mutation == "tool_inventory":
-        seq[0]["init"]["tools"] = ["shell"]
     elif mutation == "bad_schema":
         result["response"] = '{"wrong":true}'
     elif mutation == "structured_conflict":
@@ -557,6 +568,8 @@ def test_finite_process_deadline_and_exact_timeout(tmp_path):
 def test_nested_response_is_strict_json(tmp_path, body):
     task = _task(tmp_path / "not-read", expected_output_schema={"type": "object"})
     seq = events()
+    seq[0]["init"]["json_schema"] = task.expected_output_schema
+    seq[-1]["result"]["json_schema"] = task.expected_output_schema
     seq[-1]["result"]["response"] = body
     outcome = evaluate_headless_capture(
         task=task,
@@ -570,6 +583,8 @@ def test_nested_response_is_strict_json(tmp_path, body):
 def test_structured_conflict_is_type_sensitive(tmp_path):
     task = _task(tmp_path / "not-read", expected_output_schema={"type": "object"})
     seq = events()
+    seq[0]["init"]["json_schema"] = task.expected_output_schema
+    seq[-1]["result"]["json_schema"] = task.expected_output_schema
     seq[-1]["result"]["response"] = '{"x":1}'
     seq[-1]["result"]["structured_output"] = {"x": True}
     outcome = evaluate_headless_capture(
@@ -632,6 +647,10 @@ def test_unicode_line_separator_is_not_a_jsonl_record_boundary(tmp_path):
     seq[-1]["result"]["response"] = json.dumps(
         {"decision": "TYPE_A", "reason": "one\u2028two"}, ensure_ascii=False
     )
+    seq[-1]["result"]["structured_output"] = {
+        "decision": "TYPE_A",
+        "reason": "one\u2028two",
+    }
     outcome = capture(
         tmp_path,
         stdout="\n".join(json.dumps(e, ensure_ascii=False) for e in seq).encode(),
@@ -722,3 +741,212 @@ def test_cli_alias_cannot_bypass_default_codex_adapter(
     _forbid_processes(monkeypatch)
     assert main(args) != 0
     assert LIVE_GATE in capsys.readouterr().err
+
+
+def test_advertised_inventory_is_not_execution_or_grant(tmp_path):
+    seq = events()
+    seq[0]["init"]["tools"] = [f"synthetic_tool_{i}" for i in range(57)]
+    outcome = capture(tmp_path, seq)
+    assert outcome.status == "success"
+    assert len(outcome.provenance["advertised_tool_inventory"]) == 57
+    assert outcome.provenance["tool_inventory_semantics"] == "ADVERTISED_TOOL_INVENTORY"
+    assert outcome.provenance["observed_tool_steps"] == 0
+    assert outcome.provenance["observed_subagent_steps"] == 0
+    assert outcome.provenance["capability_policy"]["effective"] is None
+    assert outcome.provenance["capability_policy"]["enforcement"] == "NOT_VERIFIED"
+
+
+@pytest.mark.parametrize("inventory", [None, "shell", [None], [1], [{}], [""]])
+def test_advertised_inventory_still_requires_typed_names(tmp_path, inventory):
+    seq = events()
+    seq[0]["init"]["tools"] = inventory
+    outcome = capture(tmp_path, seq)
+    assert outcome.status == "failure"
+    assert outcome.warnings == ("ADVERTISED_TOOL_INVENTORY_INVALID",)
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    ["tool", "tool_info", "tool_name", "subagent", "subagent_info", "denied"],
+)
+def test_actual_typed_activity_fails_with_any_inventory(tmp_path, evidence):
+    seq = events()
+    seq[0]["init"]["tools"] = [f"synthetic_tool_{i}" for i in range(57)]
+    step = seq[2]["step_update"]
+    if evidence in {"tool", "subagent"}:
+        step["step_type"] = evidence
+    elif evidence == "denied":
+        seq[-1]["result"]["denied_actions"] = [{"action": "synthetic_forbidden"}]
+    else:
+        step[evidence] = {"synthetic": True} if evidence != "tool_name" else "synthetic"
+    outcome = capture(tmp_path, seq)
+    assert outcome.status == "failure"
+    assert outcome.final_output is None
+    assert outcome.warnings[0].startswith("TEXT_ONLY_")
+    assert "synthetic_forbidden" not in outcome.model_dump_json()
+
+
+@pytest.mark.parametrize("value", [None, False, "", {}, 0])
+def test_malformed_denied_actions_fail_closed(tmp_path, value):
+    seq = events()
+    seq[-1]["result"]["denied_actions"] = value
+    assert capture(tmp_path, seq).warnings == ("DENIED_ACTIONS_INVALID",)
+
+
+def test_empty_denied_actions_does_not_invent_activity(tmp_path):
+    seq = events()
+    seq[-1]["result"]["denied_actions"] = []
+    assert capture(tmp_path, seq).status == "success"
+
+
+@pytest.mark.parametrize("location", ["init", "result"])
+def test_requested_schema_must_be_echoed(tmp_path, location):
+    seq = events()
+    del seq[0 if location == "init" else -1][location]["json_schema"]
+    outcome = capture(tmp_path, seq)
+    assert outcome.status == "failure"
+    expected = (
+        "AGY_SCHEMA_NOT_EFFECTIVE" if location == "init" else "TERMINAL_SCHEMA_CONFLICT"
+    )
+    assert outcome.warnings == (expected,)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        '{"decision":"TYPE_A","reason":"done"}',
+        '```json\n{"decision":"TYPE_A","reason":"done"}\n```',
+        "ordinary prose",
+    ],
+)
+def test_free_text_never_supplies_missing_structured_output(tmp_path, response):
+    seq = events()
+    del seq[-1]["result"]["structured_output"]
+    seq[-1]["result"]["response"] = response
+    outcome = capture(tmp_path, seq)
+    assert outcome.status == "failure"
+    assert outcome.final_output is None
+    assert outcome.warnings == ("AGY_STRUCTURED_OUTPUT_CONTRACT_VIOLATION",)
+
+
+def test_structured_value_is_schema_validated_before_response(tmp_path):
+    seq = events()
+    value = {"wrong": True}
+    seq[-1]["result"].update(structured_output=value, response=json.dumps(value))
+    outcome = capture(tmp_path, seq)
+    assert outcome.failure_code == "OUTPUT_SCHEMA_INVALID"
+    assert outcome.schema_validation_status == "FAIL"
+
+
+def test_null_structured_value_is_present_not_missing(tmp_path):
+    task = _task(tmp_path / "not-read", expected_output_schema={"type": "null"})
+    seq = events()
+    seq[0]["init"]["json_schema"] = task.expected_output_schema
+    seq[-1]["result"].update(
+        json_schema=task.expected_output_schema, structured_output=None, response="null"
+    )
+    result = evaluate_headless_capture(
+        task=task,
+        stdout="\n".join(map(json.dumps, seq)).encode(),
+        exit_code=0,
+        elapsed=0.1,
+    )
+    assert "AGY_STRUCTURED_OUTPUT_CONTRACT_VIOLATION" not in result.warnings
+    assert result.schema_validation_status == "PASS"
+
+
+def test_one_input_num_turns_mismatch_is_not_admitted_without_real_evidence(tmp_path):
+    seq = events()
+    seq[-1]["result"]["num_turns"] = 4
+    outcome = capture(tmp_path, seq)
+    assert outcome.status == "failure"
+    assert outcome.provenance["user_input_step_count"] == 1
+    assert outcome.provenance["result_num_turns"] == 4
+    assert outcome.warnings == ("ONE_FRESH_TURN_REQUIRED",)
+
+
+@pytest.mark.parametrize("reported_turns", [1, 4])
+def test_multiple_actual_input_steps_fail_even_with_matching_counter(
+    tmp_path, reported_turns
+):
+    seq = events()
+    for index in (2, 3, 4):
+        extra = copy.deepcopy(seq[1])
+        extra["step_update"]["step_index"] = index
+        seq.insert(-1, extra)
+    seq[-1]["result"]["num_turns"] = reported_turns
+    outcome = capture(tmp_path, seq)
+    assert outcome.status == "failure"
+    assert outcome.provenance["user_input_step_count"] == 4
+    assert outcome.warnings == ("ONE_STRUCTURED_INPUT_REQUIRED",)
+
+
+def test_zero_user_inputs_and_response_before_input_fail(tmp_path):
+    seq = events()
+    del seq[1]
+    assert capture(tmp_path, seq).warnings == ("ONE_STRUCTURED_INPUT_REQUIRED",)
+    seq = events()
+    seq[1], seq[2] = seq[2], seq[1]
+    assert capture(tmp_path, seq).warnings == ("INPUT_MUST_PRECEDE_RESPONSE",)
+
+
+def test_active_done_input_is_one_step_not_two_inputs(tmp_path):
+    seq = events()
+    active = copy.deepcopy(seq[1])
+    active["step_update"]["state"] = "ACTIVE"
+    seq.insert(1, active)
+    result = capture(tmp_path, seq)
+    assert result.status == "success"
+    assert result.provenance["user_input_step_count"] == 1
+
+
+@pytest.mark.parametrize("mutation", ["absent", "duplicate", "mismatch", "malformed"])
+def test_schema_argument_guard_is_offline_and_content_safe(tmp_path, mutation):
+    task = _task(tmp_path / "not-read")
+    plan = compile_headless(
+        task=task, executable="/synthetic/agy", model=None, prompt="fixed"
+    )
+    argv = list(plan.argv)
+    validate_schema_argument(argv, task.expected_output_schema)
+    i = argv.index("--json-schema")
+    if mutation == "absent":
+        del argv[i : i + 2]
+    elif mutation == "duplicate":
+        argv.extend(argv[i : i + 2])
+    elif mutation == "mismatch":
+        argv[i + 1] = '{"type":"number"}'
+    else:
+        argv[i + 1] = "SYNTHETIC_SECRET_DO_NOT_ECHO"
+    with pytest.raises(ValueError, match="^ANTIGRAVITY_SCHEMA_ARGUMENT_INVALID$"):
+        validate_schema_argument(argv, task.expected_output_schema)
+
+
+@pytest.mark.parametrize("version", ["1.2.12", "1.2.13"])
+def test_exact_capture_versions_keep_strict_schema_and_single_input(tmp_path, version):
+    result = capture(tmp_path, version=version)
+    assert result.status == "success"
+    assert result.provenance["runtime_version"] == version
+    assert result.provenance["single_input_rule"] == (
+        "AGY_" + version.replace(".", "_") + "_ONE_INPUT_AND_NUM_TURNS_ONE"
+    )
+    for change in ("missing_structured", "missing_schema", "turns", "second_input"):
+        seq = events()
+        if change == "missing_structured":
+            del seq[-1]["result"]["structured_output"]
+        elif change == "missing_schema":
+            del seq[0]["init"]["json_schema"]
+        elif change == "turns":
+            seq[-1]["result"]["num_turns"] = 4
+        else:
+            row = copy.deepcopy(seq[1])
+            row["step_update"]["step_index"] = 2
+            seq.insert(-1, row)
+        assert capture(tmp_path, seq, version=version).status == "failure"
+    plan = compile_headless(
+        task=_task(tmp_path / "not-read"),
+        executable="/synthetic/agy",
+        model=None,
+        prompt="fixed",
+        version=version,
+    )
+    assert "--json-schema" in plan.argv

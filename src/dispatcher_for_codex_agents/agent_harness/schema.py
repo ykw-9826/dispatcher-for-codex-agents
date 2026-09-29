@@ -63,6 +63,10 @@ def validate_schema_definition(schema: dict[str, Any], path: str = "$") -> None:
         if len(expected_type) != len(set(expected_type)):
             raise OutputSchemaError(f"{path}: type list must not contain duplicates.")
         types = expected_type
+    elif set(schema) == {"const"} and isinstance(schema["const"], str):
+        # A singleton string const already constrains type and value exactly.
+        # Do not rewrite the caller's wire schema or admit unconstrained nodes.
+        types = ["string"]
     else:
         raise OutputSchemaError(f"{path}: an explicit type is required.")
     unknown_types = set(types) - _SUPPORTED_TYPES
