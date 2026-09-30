@@ -100,3 +100,13 @@ tests/unit/test_codex_0158.py
 docs/runtime_adapters_v1.1.0.md
 src/dispatcher_for_codex_agents/agent_harness/antigravity_live.py
 tests/unit/test_antigravity_live.py
+src/dispatcher_for_codex_agents/agent_harness/workspace_artifact.py
+src/dispatcher_for_codex_agents/agent_harness/antigravity_coding.py
+tests/unit/test_workspace_artifact.py
+tests/unit/test_antigravity_coding.py
+tests/fixtures/agy_coding/labels.py
+tests/fixtures/agy_coding/reference.py
+tests/fixtures/agy_coding/public_tests.py
+tests/fixtures/agy_coding/hidden_validator.py
+tests/fixtures/fake_agy_coding.py
+docs/workspace_artifact.md

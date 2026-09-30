@@ -257,3 +257,13 @@ requires fresh explicit approval; this outcome does not authorize another live
 call. Package metadata remains 1.0.4 on an unreleased development branch, not a
 v1.1.0 release candidate. Authentication and service access remain entirely owned
 by the official CLI, with no DCA credential access or API fallback.
+
+## Separate workspace-artifact admission experiment
+
+Coding artifact acceptance is not recovery of the failed structured-result
+contract. The [workspace-artifact contract](workspace_artifact.md) audits an
+independent Git workspace and parent-run tests; agent prose is diagnostic only.
+The first headless coding probe failed before init with a TLS handshake timeout,
+zero reported turns and no file changes. This did not establish an interaction
+blocker or a working coding backend. No retry or PTY invocation followed.
+Metadata remains 1.0.4; both AGY production routes remain unadmitted.
