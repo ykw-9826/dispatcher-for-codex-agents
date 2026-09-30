@@ -280,6 +280,44 @@ def test_no_change_is_artifact_failure_not_scope_violation(workspace):
     assert outcome["failure"] == "NO_IMPLEMENTATION_CHANGE"
 
 
+@pytest.mark.parametrize("text", ["value = 1  \n", "value = 1\n\n"])
+def test_whitespace_failure_preserves_scope_but_never_accepts(workspace, text):
+    task, baseline = workspace
+    target = task.workspace_root / "src/labels.py"
+    target.write_text(text)
+    before = target.read_bytes()
+    outcome = audit_workspace(task, baseline)
+    assert outcome["status"] == "FAIL"
+    assert outcome["scope_integrity"] == "PASS"
+    assert outcome["diff_check"] == "FAIL"
+    assert outcome["failure"] == "WORKSPACE_DIFF_CHECK_FAILED"
+    assert target.read_bytes() == before
+    assert text.strip() not in json.dumps(outcome)
+
+
+def test_git_execution_failure_is_not_whitespace(workspace, monkeypatch):
+    from dispatcher_for_codex_agents.agent_harness import workspace_artifact
+
+    task, baseline = workspace
+    (task.workspace_root / "src/labels.py").write_text("value = 1\n")
+    actual_run = subprocess.run
+
+    def run(argv, **kwargs):
+        if "--check" in argv:
+            return subprocess.CompletedProcess(
+                argv, 128, b"SYNTHETIC_PRIVATE_TEXT", b"SYNTHETIC_PRIVATE_ERROR"
+            )
+        return actual_run(argv, **kwargs)
+
+    monkeypatch.setattr(workspace_artifact.subprocess, "run", run)
+    outcome = audit_workspace(task, baseline)
+    assert outcome["status"] == "FAIL"
+    assert outcome["scope_integrity"] == "FAIL"
+    assert outcome["diff_check"] == "NOT_RUN"
+    assert outcome["failure"] == "GIT_INSPECTION_FAILED"
+    assert "SYNTHETIC_PRIVATE" not in json.dumps(outcome)
+
+
 def test_malformed_baseline_git_config_error_is_controlled(workspace):
     task, _ = workspace
     (task.workspace_root / ".git/config").write_text("SYNTHETIC_PRIVATE_TEXT")

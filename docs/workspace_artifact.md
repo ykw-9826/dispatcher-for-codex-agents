@@ -33,7 +33,11 @@ the agent. They run from the parent under Linux bubblewrap with no network,
 read-only workspace/runtime/validator mounts and a minimal credential-free
 environment. Parent-held validator files and interpreter bytes are hash-pinned.
 Scope violations skip validators; an unchanged but intact workspace can still
-be tested and remains a failed implementation. Validator sandbox failure is not
+be tested and remains a failed implementation. A whitespace-only diff-check
+failure is recorded separately as `WORKSPACE_DIFF_CHECK_FAILED`: an otherwise
+intact scope can run diagnostic validators, but even passing tests cannot turn
+that artifact into acceptance. Git execution failures still fail closed. DCA
+never edits agent output to make the check pass. Validator sandbox failure is not
 permission to run generated code unsandboxed. This is a Linux-only experimental
 boundary, not a portable sandbox framework.
 
@@ -80,6 +84,13 @@ transport failure, not model coding quality or a demonstrated approval blocker.
 No H1B or T1 was run: neither the DCA-fix retry criterion nor the interaction-only
 PTY criterion was met. PTY remains unimplemented, not failed or certified.
 
-`WORKSPACE_ARTIFACT` has offline validation only. No Antigravity backend or
+Subsequent file-only headless admission used native file tools without command
+requests or permission denials and changed only the allowed source file. Its
+extra blank line at EOF failed the mandatory Git whitespace check. This is not
+evidence that interactive terminal approval or PTY is required; it also does not
+complete the coding admission gate. Historical failure records remain unchanged.
+
+`WORKSPACE_ARTIFACT` has offline validation and incomplete live admission.
+No Antigravity backend or
 capability is production-admitted. Package metadata remains 1.0.4 on the
 unreleased development branch; this work is not a v1.1.0 release candidate.

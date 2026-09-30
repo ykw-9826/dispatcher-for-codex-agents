@@ -23,6 +23,7 @@ from dispatcher_for_codex_agents.agent_harness.workspace_artifact import digest
         ("error", "ARTIFACT_VALID_RUNTIME_ABNORMAL"),
         ("validator_error", "FAIL_ARTIFACT"),
         ("validator_deleted", "FAIL_ARTIFACT"),
+        ("whitespace", "FAIL_ARTIFACT"),
     ],
 )
 def test_one_call_sealed_post_audit_not_final_prose(
@@ -31,10 +32,12 @@ def test_one_call_sealed_post_audit_not_final_prose(
     task, _ = workspace
     fixture = Path(__file__).parents[1] / "fixtures/fake_agy_coding.py"
     exe = tmp_path / "fake-coding"
-    exe.write_text(
-        f"#!{sys.executable}\n"
-        + fixture.read_text().replace('mode = "success"', f"mode = {mode!r}")
+    fixture_text = f"#!{sys.executable}\n" + fixture.read_text().replace(
+        'mode = "success"', f"mode = {mode!r}"
     )
+    if mode == "whitespace":
+        fixture_text = fixture_text.replace('"value = 1\\n"', '"value = 1\\n\\n"')
+    exe.write_text(fixture_text)
     exe.chmod(0o700)
     config = tmp_path / "admission.json"
     config.write_text(
@@ -92,6 +95,12 @@ def test_one_call_sealed_post_audit_not_final_prose(
     assert result["dca_logical_invocations"] == 1
     assert result["dca_retries"] == 0
     assert result["final_text_authority"] is False
+    if mode == "whitespace":
+        assert result["artifact_audit"]["failure"] == "WORKSPACE_DIFF_CHECK_FAILED"
+        assert result["artifact_audit"]["scope_integrity"] == "PASS"
+        assert result["artifact_audit"]["diff_check"] == "FAIL"
+        assert result["validators"][0]["status"] == "PASS"
+        assert (task.workspace_root / "src/labels.py").read_bytes() == b"value = 1\n\n"
     assert "SYNTHETIC_PRIVATE_CONTENT_DO_NOT_ECHO" not in json.dumps(result)
     if mode == "validator_deleted":
         assert result["validator_support_unchanged"] is False

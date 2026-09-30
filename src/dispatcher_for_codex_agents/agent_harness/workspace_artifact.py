@@ -26,6 +26,10 @@ class WorkspaceContractError(ValueError):
     """Fixed, content-free diagnostic; never raw Git/config/process errors."""
 
 
+class _DiffCheckFailed(WorkspaceContractError):
+    """Git inspected the diff and rejected its whitespace, not its file scope."""
+
+
 class ValidatorCommand(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     name: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
@@ -116,6 +120,8 @@ def _git(root: Path, *args: str) -> bytes:
         capture_output=True,
         timeout=10,
     )
+    if p.returncode == 2 and args[0] == "diff" and "--check" in args:
+        raise _DiffCheckFailed("WORKSPACE_DIFF_CHECK_FAILED")
     if p.returncode:
         raise WorkspaceContractError("GIT_INSPECTION_FAILED")
     return p.stdout
@@ -291,15 +297,19 @@ def audit_workspace(task: WorkspaceArtifactTask, baseline: dict) -> dict:
             or result["unexpected_untracked"]
         ):
             raise WorkspaceContractError("WORKSPACE_SCOPE_VIOLATION")
-        _git(
-            root,
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--check",
-            task.baseline_commit,
-            "--",
-        )
+        try:
+            _git(
+                root,
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--check",
+                task.baseline_commit,
+                "--",
+            )
+        except _DiffCheckFailed:
+            result.update(diff_check="FAIL", scope_integrity="PASS")
+            raise
         result["diff_check"] = "PASS"
         result["scope_integrity"] = "PASS"
         if not changed:
