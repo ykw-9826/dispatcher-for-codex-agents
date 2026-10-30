@@ -1,6 +1,6 @@
 # CLI/API contract v1
 
-Distribution: `dispatcher-for-codex-agents`, version `1.0.4` (development).
+Distribution: `dispatcher-for-codex-agents`, version `1.1.0b1` (beta).
 Python namespace: `dispatcher_for_codex_agents`.
 Entry points: `dca`, `dca-notify`.
 Execution API: `dispatcher_for_codex_agents.agent_harness`.

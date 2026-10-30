@@ -110,3 +110,17 @@ tests/fixtures/agy_coding/public_tests.py
 tests/fixtures/agy_coding/hidden_validator.py
 tests/fixtures/fake_agy_coding.py
 docs/workspace_artifact.md
+src/dispatcher_for_codex_agents/agent_harness/autonomous_workspace.py
+tests/unit/test_autonomous_workspace.py
+tests/fixtures/agy_workspace/parser.py
+tests/fixtures/agy_workspace/normalize.py
+tests/fixtures/agy_workspace/pipeline.py
+tests/fixtures/agy_workspace/public_tests.py
+tests/fixtures/agy_workspace/hidden_validator.py
+tests/fixtures/agy_workspace/build_fixture.py
+tests/fixtures/agy_workspace/build_validator.py
+tests/fixtures/agy_workspace/reference_parser.py
+tests/fixtures/agy_workspace/reference_normalize.py
+src/dispatcher_for_codex_agents/agent_harness/antigravity_autonomous.py
+tests/unit/test_antigravity_autonomous.py
+tests/fixtures/fake_agy_autonomous.py

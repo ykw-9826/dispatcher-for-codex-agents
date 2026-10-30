@@ -25,8 +25,10 @@ from public_snapshot import build_snapshot
 def project_version(root: Path, tag: str | None = None) -> str:
     project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
     version = project["version"]
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
-        raise ValueError("EXPECTED_STABLE_PACKAGE_VERSION")
+    if not re.fullmatch(
+        r"[0-9]+\.[0-9]+\.[0-9]+(?:a[0-9]+|b[0-9]+|rc[0-9]+)?", version
+    ):
+        raise ValueError("EXPECTED_PEP440_PACKAGE_VERSION")
     if tag is not None and tag != "v" + version:
         raise ValueError("TAG_PACKAGE_VERSION_MISMATCH")
     lock = tomllib.loads((root / "uv.lock").read_text())

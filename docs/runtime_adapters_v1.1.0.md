@@ -1,8 +1,8 @@
-# Runtime adapter offline foundation (proposed v1.1.0)
+# Runtime adapter beta foundation (v1.1.0b1)
 
-This is an unreleased engineering boundary, not live-runtime certification.
-Package metadata remains at the frozen 1.0.4 baseline until a release decision.
-Production releases and historical records are not migrated.
+This beta is an engineering boundary, not live-runtime certification or a
+production release. Package metadata is `1.1.0b1`. Production releases and
+historical records are not migrated.
 
 ## Codex 0.158.0
 
@@ -254,9 +254,9 @@ versions or a grant of subscription usage rights.
 
 The production registry stays closed. The experimental Python admission entry
 requires fresh explicit approval; this outcome does not authorize another live
-call. Package metadata remains 1.0.4 on an unreleased development branch, not a
-v1.1.0 release candidate. Authentication and service access remain entirely owned
-by the official CLI, with no DCA credential access or API fallback.
+call. Beta package metadata is `1.1.0b1`; this does not create a production or
+v1.1.0 final release. Authentication and service access remain entirely owned by
+the official CLI, with no DCA credential access or API fallback.
 
 ## Separate workspace-artifact admission experiment
 
@@ -266,4 +266,4 @@ independent Git workspace and parent-run tests; agent prose is diagnostic only.
 The first headless coding probe failed before init with a TLS handshake timeout,
 zero reported turns and no file changes. This did not establish an interaction
 blocker or a working coding backend. No retry or PTY invocation followed.
-Metadata remains 1.0.4; both AGY production routes remain unadmitted.
+Beta metadata is `1.1.0b1`; both AGY production routes remain unadmitted.

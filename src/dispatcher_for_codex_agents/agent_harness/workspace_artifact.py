@@ -349,11 +349,15 @@ def run_validators(
     for raw in (Path("/usr"), Path("/lib"), Path("/lib64")):
         if raw.exists():
             base.extend(("--ro-bind", str(raw.resolve()), str(raw)))
-    for path in (*mounts, task.workspace_root):
+    support_paths = [task.workspace_root]
+    for command in task.validator_commands:
+        support_paths.append(Path(command.argv[0]))
+    for path in (*support_paths, *mounts):
         if (
             not path.is_absolute()
-            or path.resolve(strict=True) != path
+            or ".." in path.parts
             or path == Path("/")
+            or not path.exists()
         ):
             raise WorkspaceContractError("VALIDATOR_MOUNT_INVALID")
         base.extend(("--ro-bind", str(path), str(path)))
@@ -385,12 +389,20 @@ def run_validators(
                 env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
             )
             raw = p.stdout + p.stderr
+            sandbox_blocked = b"No permissions to create new namespace" in raw
             record = {
                 "name": command.name,
-                "status": "PASS" if p.returncode == 0 else "FAIL",
+                "status": (
+                    "DEFERRED"
+                    if sandbox_blocked
+                    else "PASS" if p.returncode == 0 else "FAIL"
+                ),
                 "exit_code": p.returncode,
                 "log_sha256": digest(raw),
             }
+            if sandbox_blocked:
+                record["failure"] = "VALIDATOR_SANDBOX_UNAVAILABLE"
+                record["validator_sandbox_enforcement"] = "DEFERRED"
         except subprocess.TimeoutExpired as exc:
             raw = (exc.stdout or b"") + (exc.stderr or b"")
             record = {

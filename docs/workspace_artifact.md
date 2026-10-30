@@ -91,6 +91,96 @@ evidence that interactive terminal approval or PTY is required; it also does not
 complete the coding admission gate. Historical failure records remain unchanged.
 
 `WORKSPACE_ARTIFACT` has offline validation and incomplete live admission.
-No Antigravity backend or
-capability is production-admitted. Package metadata remains 1.0.4 on the
-unreleased development branch; this work is not a v1.1.0 release candidate.
+No Antigravity backend or capability is production-admitted. Beta package
+metadata is `1.1.0b1`; this work is not a production v1.1.0 release.
+
+## Autonomous-workspace post-audit (not live-admitted)
+
+The autonomous command/capture foundation is pinned to AGY **1.4.10**, not a
+wildcard admission for future CLI versions. It uses the documented `--sandbox`,
+`--project` (official project ID/name), `--output-format stream-json`, and an
+explicit finite `--print-timeout`. It emits no schema, model/auth override,
+resume flag or permission bypass. Before the prompt-bearing spawn,
+`launch_autonomous_workspace` verifies the pinned hash, runs a bounded no-prompt
+`--version` probe, rechecks the hash, and rechecks it again immediately before
+attempt creation. It then performs one fresh subprocess, records and kills on
+deadline, and runs the parent post-audit only after protocol success. It does
+not register the production adapter. A project selector alone proves neither its
+workspace folders nor its effective permission rules. The child receives an
+explicit minimal allowlist and preserves the real parent's `SSH_CLIENT` and
+`SSH_CONNECTION` context; DCA still does not copy authentication files, tokens
+or the full environment.
+
+The reviewed 1.4.10 pin is SHA256
+`49287151de19bb36578125fbd46ee3fa47e96c0b6d29d5e2439a4e4e0880fa5d`.
+The caller must pass this digest through `AutonomousRuntimeApproval`; the actual
+binary is checked against that approval before the version probe and again before
+attempt creation. The 1.3.5 pin and its failed smoke evidence remain historical
+records and are not overwritten by this pin update.
+
+Native sandbox enforcement is not an admission gate for a controlled AGY
+development benchmark because this Codex execution host denies unprivileged
+namespace creation. The launcher supports explicit `sandbox=False`; this mode
+omits `--sandbox` and records `UNSANDBOXED/DEFERRED`, never `PASS`. It emits no
+permission bypass flag, does not alter global configuration, and remains limited
+to an explicitly reviewed disposable workspace. Validator sandbox unavailability
+is recorded as `VALIDATOR_SANDBOX_UNAVAILABLE` and `DEFERRED`; validation is not
+fabricated. Protected paths, Git/filesystem scope, hygiene and validator identity
+still fail closed before a functional result can be accepted.
+
+The synthetic 1.4.10 capture subset permits multiple turns and known local coding
+tool steps. Final cumulative usage is recorded once; per-step usage is not added
+again. Missing usage is `NOT_REPORTED`, and physical provider requests/internal
+retries remain `UNKNOWN`. Terminal success cannot certify sandbox enforcement or
+override the independent parent artifact audit. Unsupported events, recursion,
+incomplete steps and contradictory terminal events fail closed. This is offline
+protocol validation, not proof of current login, subscription, permission or live
+coding acceptance. Historical structured-result/exact-file contracts are unchanged.
+
+`AutonomousWorkspaceTask` is a separate result/recovery contract for an entire
+disposable repository. It is not an exact-file write grant, a second
+`capability_policy`, or permission to launch an external process. The existing
+structured-result and exact-file workspace-artifact contracts remain unchanged.
+There is no automatic registry promotion or live invocation entry in this module.
+
+The parent freezes a clean, standalone, remote-free Git baseline, actual file
+hashes/modes, optional exact protected paths and trusted validators. New source
+and build files are allowed in this audit contract, but links, changed Git
+configuration/storage, HEAD, branch or remote fail closed. Comparing with the
+baseline and enumerating ignored/untracked files prevents a clean current diff
+from hiding changes. Shared Git worktrees are not admitted by this first audit.
+
+Protected-file changes are rejected by default. An explicit `restore` policy
+records a recovery plan, restores the frozen bytes/mode and records
+`SUPERVISOR_RESTORE_APPLIED` before independently validating the recovered tree.
+Recovery never changes history or conceals the agent's original changes.
+Protected paths changed in Git's index fail closed even if their working files
+have been restored; DCA does not silently reset the index or leave those changes
+ready for a later commit.
+Each audit has exclusive output storage and a recomputable file hash manifest.
+
+Scope, functionality, hygiene and runtime completion are separate results.
+Whitespace-only problems can produce `FUNCTIONAL_PASS_CLEANUP_REQUIRED`; failing
+tests, scope violations or an abnormal/unknown runtime can never become PASS.
+The parent must quiesce the external process before audit. Final-state hashes do
+not prove absence of transient actions; the official runtime must separately
+enforce its approved sandbox/file/tool boundary.
+
+Validators reuse the credential-free, network-free, read-only Linux sandbox.
+The synthetic multi-file benchmark has independent public tests, 1,464 hidden
+combinations and a parent-only build oracle. Builds run on a scratch copy inside
+the validator sandbox and are checked against source bytes without making the
+repository mount writable. Neither reference fixes nor hidden validators belong
+in the external agent's task workspace.
+
+This is not evidence that authentication, network, web, MCP, subagents, custom
+agents or session reuse has passed live admission. Native AGY sandbox
+enforcement also remains separately uncertified. The beta package identity does
+not satisfy the separate autonomous coding and release-review gates.
+
+The current minimal live admission requires a reviewed pinned AGY 1.4.10 binary,
+`--version` and pre-spawn hash checks, one fresh logical invocation, no retries,
+the fixed synthetic prompt, an explicit official project selector, and the
+existing parent audit. Native AGY sandbox enforcement and the validator bwrap
+layer may be deferred only in this controlled development mode; neither can be
+promoted to enforcement evidence by a successful benchmark.

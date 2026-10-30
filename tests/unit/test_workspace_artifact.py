@@ -366,3 +366,48 @@ def test_validator_sandbox_does_not_inherit_credentials(
     assert options["env"] == {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
     assert not any("DO_NOT_INHERIT" in v for v in argv)
     assert result[0]["status"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "/synthetic/../synthetic/validator",
+        "/nonexistent/synthetic-validator",
+    ],
+)
+def test_validator_mount_rejects_noncanonical_or_missing(
+    workspace, tmp_path, raw  # noqa: F811
+):
+    """A non-canonical or missing validator path must fail closed.
+
+    Regression: an earlier revision used ``path != Path(path)``, which is
+    always False and silently dropped the dot-dot and existence checks.
+    """
+    from dispatcher_for_codex_agents.agent_harness import workspace_artifact
+
+    task = workspace[0].model_copy(
+        update={
+            "validator_commands": (ValidatorCommand(name="public", argv=(raw,)),),
+        }
+    )
+    with pytest.raises(WorkspaceContractError, match="VALIDATOR_MOUNT_INVALID"):
+        workspace_artifact.run_validators(task, mounts=(), output=tmp_path / "v")
+
+
+def test_validator_mount_allows_usrmerge_symlink(
+    workspace, tmp_path, monkeypatch
+):  # noqa: F811
+    """/bin/true is a usrmerge symlink; canonical inequality must not reject it."""
+    from dispatcher_for_codex_agents.agent_harness import workspace_artifact
+
+    monkeypatch.setattr(
+        workspace_artifact.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=b"PASS", stderr=b""
+        ),
+    )
+    result = workspace_artifact.run_validators(
+        workspace[0], mounts=(), output=tmp_path / "validation"
+    )
+    assert result[0]["status"] == "PASS"
